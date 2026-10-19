@@ -399,8 +399,39 @@ pub fn chart(data: &Data, ci: usize, k: ChartKind) -> Option<ChartData> {
     }
 }
 
-pub fn cell_string(s: &Series, row: usize, _kind: ColKind) -> String {
-    use polars::prelude::AnyValue;
+/// All cells (row-major) whose rendered text contains `q`, case-insensitive.
+pub fn find_all(data: &Data, q: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let ncols = data.cols.len();
+    let height = data.df.height();
+    if ncols == 0 || height == 0 {
+        return out;
+    }
+    let needle = q.to_lowercase();
+    let series: Vec<(Series, ColKind)> = data
+        .cols
+        .iter()
+        .map(|c| {
+            let s = data
+                .df
+                .column(c.name.as_str())
+                .expect("columns are stable")
+                .as_materialized_series();
+            (s.clone(), c.kind)
+        })
+        .collect();
+    for r in 0..height {
+        for ci in 0..ncols {
+            let t = cell_string(&series[ci].0, r, series[ci].1);
+            if !t.is_empty() && t.to_lowercase().contains(&needle) {
+                out.push((r, ci));
+            }
+        }
+    }
+    out
+}
+
+pub fn cell_string(s: &Series, row: usize, _kind: ColKind) -> String {    use polars::prelude::AnyValue;
     let out = match s.get(row) {
         Ok(av) => match av {
             AnyValue::Null => String::new(),

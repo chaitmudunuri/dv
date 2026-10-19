@@ -17,6 +17,10 @@ const CURSOR: Style = Style::new()
     .bg(Color::Rgb(70, 120, 220))
     .fg(Color::Black)
     .add_modifier(Modifier::BOLD);
+const HIT: Style = Style::new()
+    .bg(Color::Rgb(140, 90, 0))
+    .fg(Color::White)
+    .add_modifier(Modifier::BOLD);
 
 // ---------- helpers ----------
 
@@ -304,9 +308,19 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         for c in &cols {
             let text = c.cells.get(rel).cloned().unwrap_or_default();
             let right = app.data.cols[c.ci].kind == ColKind::Number;
-            let cell = format!("{} ", pad_align(text, c.w, right));
+            let cell = format!("{} ", pad_align(text.clone(), c.w, right));
+            let is_hit = app
+                .finding
+                .as_ref()
+                .map(|q| {
+                    let lq = q.to_lowercase();
+                    text.to_lowercase().contains(&lq)
+                })
+                .unwrap_or(false);
             let style = if c.ci == app.sel.col && row == app.sel.row {
                 CURSOR
+            } else if is_hit {
+                HIT
             } else {
                 Style::new()
             };
@@ -540,7 +554,16 @@ fn draw_topk(f: &mut ratatui::Frame, area: Rect, items: &[(String, u64)], total:
 fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let ci = app.sel.col;
     let row = app.sel.row;
-    let line1 = if let Some((m, c)) = app.msg.clone() {
+    let line1 = if app.search_mode {
+        Line::from(vec![
+            Span::styled(
+                " search ",
+                Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" /{}", app.search_input), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled("  [enter] find · [esc] cancel ", DIM),
+        ])
+    } else if let Some((m, c)) = app.msg.clone() {
         Line::from(vec![Span::styled(
             format!(" {} ", m),
             Style::new().fg(Color::Black).bg(color_for(c)),
@@ -576,9 +599,23 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             ));
             spans.push(Span::styled(v, Style::new().add_modifier(Modifier::BOLD)));
         }
+        if let Some(q) = &app.finding {
+            spans.push(Span::styled(
+                if app.hits.is_empty() {
+                    format!("· /{q} 0 hits")
+                } else {
+                    format!("· /{q} {} hit{} ", app.hits.len(), if app.hits.len() == 1 { "" } else { "s" })
+                },
+                Style::new().fg(Color::Yellow),
+            ));
+        }
         Line::from(spans)
     };
-    let keys = " [j k l h] move · [p] profile · [c] chart type · [t] toggle chart · [g/G] top/bottom · [?] help · [q] quit ";
+    let keys = if app.search_mode {
+        ""
+    } else {
+        " [j k l h] move · [/] search · [n] next hit · [p] profile · [c] chart type · [t] toggle chart · [g/G] top/bottom · [?] help · [q] quit "
+    };
     f.render_widget(Paragraph::new(vec![line1]), Rect { height: 1, ..area });
     f.render_widget(
         Paragraph::new(Span::styled(keys, DIM)),
@@ -689,6 +726,9 @@ fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
 const HELP: &[(&str, &str)] = &[
     ("h / j / k / l (←↑→↓)", "move cursor"),
     ("Tab / BackTab", "next / previous cell"),
+    ("/", "search prompts for text"),
+    ("n / N", "next / previous search hit"),
+    ("esc", "clear search hits"),
     ("g / G", "jump to top / bottom row"),
     ("PgUp / PgDn", "page 10 rows"),
     ("p", "profile column under cursor"),
