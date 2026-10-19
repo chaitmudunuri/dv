@@ -34,26 +34,28 @@ specific one with a `::table` suffix, e.g. `dv demo.duckdb::tips`.
 |---|---|
 | `h j k l` / arrows | move cursor |
 | `Tab` / `BackTab` | next / previous cell |
-| `/` | search text across cells |
-| `n` / `N` | next / previous search hit |
+| `/` | search text across cells (`n`/`N` next/prev hit) |
+| `f` | filter rows (substring or `col>val`, `col=val`, `col!=val`) |
 | `s` / `S` | sort column ascending / descending |
-| `u` | reset sort order to original |
+| `u` | reset sort order and active filter |
 | `F` | freeze / unfreeze columns up to cursor |
 | `<` / `>` | shrink / widen column width |
 | `=` | reset column width to auto-fit |
+| `H` | toggle conditional formatting / heatmap |
+| `x` | toggle column as X-axis for bivariate chart ($X$ vs $Y$) |
+| `e` | export current view to CSV, Parquet, or JSONL |
+| `m` | table / sheet picker (SQLite, DuckDB, Excel) |
 | `y` / `Y` | yank cell / row as CSV to clipboard |
 | `g` / `G` | jump to top / bottom row |
 | `PgUp` / `PgDn` | page 10 rows |
-| `p` | profile the column under the cursor |
+| `p` | profile column (stats, quantiles, sparkline, box plot) |
 | `c` | cycle chart type (HIST → LINE → DOT) |
 | `t` | toggle chart pane |
 | `0` | jump to first column |
-| `?` | help |
+| `?` | help overlay |
 | `q` | quit |
 
-
-Numeric columns show a histogram, line, or dot plot; text and bool
-columns show a TOP-K bar chart.
+Numeric columns show a histogram, line, or dot plot; bivariate charting (`x`) plots two numeric columns against each other. Text and bool columns show a TOP-K bar chart. Column profiling (`p`) provides percentiles (`p25`, median, `p75`, `p90`, `p99`, `iqr`) and a Unicode box & whisker plot.
 
 ## Install
 

@@ -173,12 +173,14 @@ pub fn render_frame(f: &mut ratatui::Frame, app: &mut App) {
         draw_chart_pane(f, chart_area, app);
     }
     draw_status(f, status, app);
-    match app.overlay {
-        Overlay::Profile(ci) => draw_profile(f, area, app, ci),
+    match &app.overlay {
+        Overlay::Profile(ci) => draw_profile(f, area, app, *ci),
         Overlay::Help => draw_help(f, area),
+        Overlay::TablePicker { tables, selected } => draw_table_picker(f, area, tables, *selected),
         Overlay::None => {}
     }
 }
+
 
 // ---------- grid ----------
 
@@ -326,6 +328,9 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 letter.push(if asc { '▲' } else { '▼' });
             }
         }
+        if app.x_col == Some(c.ci) {
+            letter = format!("{}[X]", letter);
+        }
         let style = if c.ci == app.sel.col {
             Style::new().bg(Color::Rgb(120, 120, 40)).fg(Color::Black).add_modifier(Modifier::BOLD)
         } else {
@@ -373,6 +378,31 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 CURSOR
             } else if is_hit {
                 HIT
+            } else if app.heatmap && app.data.cols[c.ci].kind == ColKind::Number {
+                if let Ok(v) = text.trim().parse::<f64>() {
+                    let st = app.profile(c.ci).num;
+                    if let Some(st) = st {
+                        if st.max > st.min {
+                            let ratio = ((v - st.min) / (st.max - st.min)).clamp(0.0, 1.0);
+                            let (fg, bg) = if ratio < 0.25 {
+                                (Color::Cyan, Color::Rgb(15, 30, 60))
+                            } else if ratio < 0.50 {
+                                (Color::Green, Color::Rgb(20, 50, 40))
+                            } else if ratio < 0.75 {
+                                (Color::Yellow, Color::Rgb(60, 60, 20))
+                            } else {
+                                (Color::Rgb(255, 120, 120), Color::Rgb(80, 20, 20))
+                            };
+                            Style::new().fg(fg).bg(bg)
+                        } else {
+                            Style::new()
+                        }
+                    } else {
+                        Style::new()
+                    }
+                } else {
+                    Style::new()
+                }
             } else {
                 Style::new()
             };
@@ -383,6 +413,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 spans.push(Span::raw(" "));
             }
         }
+
         f.render_widget(
             Paragraph::new(Line::from(spans)),
             Rect { y: area.y + rel as u16 + 1, height: 1, ..area },
@@ -408,7 +439,7 @@ fn ensure_chart(app: &mut App) {
     if app.chart_valid && app.chart_col == ci && kind_compatible {
         return;
     }
-    app.chart_data = crate::data::chart(&app.data, ci, eff);
+    app.chart_data = crate::data::chart(&app.data, ci, eff, app.x_col);
     app.chart_col = ci;
     app.chart_valid = true;
 }
@@ -437,14 +468,24 @@ fn draw_chart_pane(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             )));
         }
         Some(ChartData::Series { pts }) => {
+            let label = if let Some(xi) = app.x_col {
+                if xi < app.data.cols.len() && xi != ci {
+                    format!("{} vs {} {}", head, col_letter(xi), app.data.cols[xi].name)
+                } else {
+                    head
+                }
+            } else {
+                head
+            };
             title.push(Span::raw(format!(
                 " {}  points={}  nulls={}/{}",
-                head,
+                label,
                 pts.len(),
                 p.nulls,
                 app.data.df.height()
             )));
         }
+
         Some(ChartData::TopK { total, items }) => {
             let from = items.iter().take(5).map(|(_, c)| *c).sum::<u64>();
             title.push(Span::raw(format!(
@@ -548,12 +589,24 @@ fn draw_series(f: &mut ratatui::Frame, area: Rect, pts: &[(f64, f64)], line: boo
         f.render_widget(Paragraph::new("no data").style(DIM), area);
         return;
     }
-    let n = pts.last().unwrap().0;
+    let mut xmin = f64::INFINITY;
+    let mut xmax = f64::NEG_INFINITY;
     let mut ymin = f64::INFINITY;
     let mut ymax = f64::NEG_INFINITY;
-    for &(_, y) in pts {
+    for &(x, y) in pts {
+        xmin = xmin.min(x);
+        xmax = xmax.max(x);
         ymin = ymin.min(y);
         ymax = ymax.max(y);
+    }
+    if (xmax - xmin).abs() < f64::EPSILON {
+        let pad = (xmax.abs() * 0.1).max(1.0);
+        xmin -= pad;
+        xmax += pad;
+    } else {
+        let pad = (xmax - xmin) * 0.04;
+        xmin -= pad;
+        xmax += pad;
     }
     if (ymax - ymin).abs() < f64::EPSILON {
         let pad = (ymax.abs() * 0.1).max(1.0);
@@ -573,8 +626,8 @@ fn draw_series(f: &mut ratatui::Frame, area: Rect, pts: &[(f64, f64)], line: boo
         .style(Style::new())
         .x_axis(
             Axis::default()
-                .bounds([0.0, n.max(1.0)])
-                .labels(vec!["0".to_string(), n.to_string()])
+                .bounds([xmin, xmax])
+                .labels(vec![fmt_num(xmin), fmt_num(xmax)])
                 .style(DIM),
         )
         .y_axis(
@@ -621,6 +674,24 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Span::styled(format!(" /{}", app.search_input), Style::new().add_modifier(Modifier::BOLD)),
             Span::styled("  [enter] find · [esc] cancel ", DIM),
         ])
+    } else if app.filter_mode {
+        Line::from(vec![
+            Span::styled(
+                " filter ",
+                Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {}", app.filter_input), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled("  text or col>val · [enter] apply (blank resets) · [esc] cancel ", DIM),
+        ])
+    } else if app.export_mode {
+        Line::from(vec![
+            Span::styled(
+                " export ",
+                Style::new().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {}", app.export_input), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled("  filename (.csv, .parquet, .jsonl) · [enter] export · [esc] cancel ", DIM),
+        ])
     } else if let Some((m, c)) = app.msg.clone() {
         Line::from(vec![Span::styled(
             format!(" {} ", m),
@@ -660,19 +731,39 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         if let Some(q) = &app.finding {
             spans.push(Span::styled(
                 if app.hits.is_empty() {
-                    format!("· /{q} 0 hits")
+                    format!(" · /{q} 0 hits")
                 } else {
-                    format!("· /{q} {} hit{} ", app.hits.len(), if app.hits.len() == 1 { "" } else { "s" })
+                    format!(" · /{q} {} hit{} ", app.hits.len(), if app.hits.len() == 1 { "" } else { "s" })
                 },
                 Style::new().fg(Color::Yellow),
             ));
         }
+        if let Some(f) = &app.active_filter {
+            spans.push(Span::styled(
+                format!(" · [filter: {f}]"),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if let Some(xi) = app.x_col {
+            if xi < app.data.cols.len() {
+                spans.push(Span::styled(
+                    format!(" · [X: {}]", app.data.cols[xi].name),
+                    Style::new().fg(Color::Green),
+                ));
+            }
+        }
+        if app.heatmap {
+            spans.push(Span::styled(
+                " · [HEATMAP]",
+                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+        }
         Line::from(spans)
     };
-    let keys = if app.search_mode {
+    let keys = if app.search_mode || app.filter_mode || app.export_mode {
         ""
     } else {
-        " [j k l h] move · [/] search · [n] next hit · [s/S/u] sort · [F] freeze · [< > =] width · [y/Y] yank · [p] profile · [c] chart · [?] help · [q] quit "
+        " [j k l h] move · [/] search · [n] next hit · [f] filter · [s/S/u] sort · [F] freeze · [H] heatmap · [e] export · [m] tables · [p] profile · [c] chart · [?] help · [q] quit "
     };
 
 
@@ -707,7 +798,7 @@ fn popup(area: Rect, wpct: u16, hpct: u16) -> Rect {
 fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
     let p: Profile = app.profile(ci).clone();
     let col = app.data.cols[ci].clone();
-    let rects = popup(area, 70, 80);
+    let rects = popup(area, 70, 85);
     f.render_widget(Clear, rects);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -735,29 +826,49 @@ fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
     if let Some(st) = &p.num {
         lines.push(Line::from(vec![
             Span::styled("min      ", DIM),
-            Span::raw(fmt_num(st.min)),
+            Span::raw(format!("{:<14}", fmt_num(st.min))),
+            Span::styled("p25      ", DIM),
+            Span::raw(fmt_num(st.p25)),
         ]));
         lines.push(Line::from(vec![
             Span::styled("max      ", DIM),
-            Span::raw(fmt_num(st.max)),
+            Span::raw(format!("{:<14}", fmt_num(st.max))),
+            Span::styled("median   ", DIM),
+            Span::raw(fmt_num(st.p50)),
         ]));
         lines.push(Line::from(vec![
             Span::styled("mean     ", DIM),
-            Span::raw(fmt_num(st.mean)),
+            Span::raw(format!("{:<14}", fmt_num(st.mean))),
+            Span::styled("p75      ", DIM),
+            Span::raw(fmt_num(st.p75)),
         ]));
         lines.push(Line::from(vec![
             Span::styled("σ (std)  ", DIM),
-            Span::raw(fmt_num(st.std)),
+            Span::raw(format!("{:<14}", fmt_num(st.std))),
+            Span::styled("p90      ", DIM),
+            Span::raw(fmt_num(st.p90)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("iqr      ", DIM),
+            Span::raw(format!("{:<14}", fmt_num(st.iqr))),
+            Span::styled("p99      ", DIM),
+            Span::raw(fmt_num(st.p99)),
         ]));
         lines.push(Line::from(""));
+        let w = 55usize.min(inner.width as usize);
         if let Some(bins) = &p.hist {
-            let w = 60usize.min(inner.width as usize);
+            lines.push(Line::from(Span::styled("histogram", DIM)));
             lines.push(Line::from(Span::styled(spark(bins, w), NUM_FG)));
             lines.push(Line::from(vec![
                 Span::styled(fmt_num(st.min), DIM),
                 Span::raw(" ".repeat(w.saturating_sub(fmt_num(st.min).width() + fmt_num(st.max).width()))),
                 Span::raw(fmt_num(st.max)),
             ]));
+        }
+        if w >= 10 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("box & whisker", DIM)));
+            lines.push(Line::from(Span::styled(box_plot(st, w), Color::Yellow)));
         }
     }
     if let Some(items) = &p.top {
@@ -774,13 +885,88 @@ fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
             }
         }
     }
-    let l = lines.len();
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" esc/p/q: close ", DIM)));
-    f.render_widget(
-        Paragraph::new(lines),
-        Rect { height: inner.height.min(l as u16 + 2), ..inner },
-    );
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn box_plot(st: &crate::data::NumStats, width: usize) -> String {
+    if width < 5 || st.count == 0 {
+        return String::new();
+    }
+    let span = st.max - st.min;
+    if span <= f64::EPSILON {
+        return format!("├{}┤", "─".repeat(width.saturating_sub(2)));
+    }
+    let map = |v: f64| -> usize {
+        let frac = ((v - st.min) / span).clamp(0.0, 1.0);
+        (frac * (width - 1) as f64).round() as usize
+    };
+
+    let p_min = 0;
+    let p_q1 = map(st.p25).min(width - 1);
+    let p_med = map(st.p50).min(width - 1);
+    let p_q3 = map(st.p75).min(width - 1);
+    let p_max = width - 1;
+
+    let mut chars = vec![' '; width];
+    // whiskers
+    for i in p_min..=p_q1 {
+        chars[i] = '─';
+    }
+    chars[0] = '├';
+
+    for i in p_q3..=p_max {
+        chars[i] = '─';
+    }
+    chars[width - 1] = '┤';
+
+    // box interior
+    for i in p_q1..=p_q3 {
+        chars[i] = '░';
+    }
+    if p_q1 == p_q3 {
+        chars[p_q1] = '│';
+    } else {
+        chars[p_med] = '│';
+        chars[p_q1] = '[';
+        chars[p_q3] = ']';
+    }
+
+    chars.into_iter().collect()
+}
+
+fn draw_table_picker(f: &mut ratatui::Frame, area: Rect, tables: &[String], selected: usize) {
+    let h = (tables.len() as u16 + 5).clamp(8, 20);
+    let rects = popup(area, 50, (h * 100 / area.height.max(1)).clamp(30, 80));
+    f.render_widget(Clear, rects);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Select Table / Sheet ",
+            Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(DIM);
+    let inner = block.inner(rects);
+    f.render_widget(block, rects);
+
+    let mut lines = Vec::new();
+    for (i, t) in tables.iter().enumerate() {
+        if i == selected {
+            lines.push(Line::from(vec![
+                Span::styled(" ► ", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {} ", t), Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::raw(t.clone()),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" [j/k/↑/↓] navigate · [enter] load · [esc/q] cancel ", DIM)));
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -788,15 +974,19 @@ const HELP: &[(&str, &str)] = &[
     ("Tab / BackTab", "next / previous cell"),
     ("/", "search prompts for text"),
     ("n / N", "next / previous search hit"),
-    ("esc", "clear search hits"),
-    ("s / S / u", "sort asc / desc / reset sort"),
+    ("f", "filter rows (substring or col>val, col=val)"),
+    ("s / S / u", "sort asc / desc / reset sort & filter"),
     ("F", "freeze / unfreeze columns up to cursor"),
     ("< / > / =", "shrink / widen / reset column width"),
+    ("H", "toggle conditional formatting / heatmap"),
     ("y / Y", "yank cell / row as CSV to clipboard"),
+    ("e", "export current view to CSV, Parquet, or JSONL"),
+    ("m", "table / sheet picker (multi-table files)"),
     ("g / G", "jump to top / bottom row"),
     ("PgUp / PgDn", "page 10 rows"),
-    ("p", "profile column under cursor"),
+    ("p", "profile column (stats, quantiles, box plot)"),
     ("c", "cycle chart type (HIST→LINE→DOT)"),
+    ("x", "toggle column as X-axis for bivariate chart"),
     ("t", "toggle chart pane"),
     ("0", "jump to first column"),
     ("q", "quit"),

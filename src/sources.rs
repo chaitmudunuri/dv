@@ -138,16 +138,28 @@ fn hex_str(b: &[u8]) -> String {
 
 // ---------- excel ----------
 
-pub fn load_excel(path: &std::path::Path) -> Result<Data> {
+pub fn load_excel(path: &std::path::Path, sheet_hint: Option<String>) -> Result<Data> {
     use calamine::Reader as _;
     let mut wb = calamine::open_workbook_auto(path)?;
-    let sheet = wb
-        .sheet_names()
-        .first()
-        .cloned()
-        .with_context(|| format!("no sheets in {}", path.display()))?;
+    let sheets = wb.sheet_names();
+    let sheet = if let Some(h) = sheet_hint {
+        if sheets.iter().any(|s| s == &h) {
+            h
+        } else {
+            sheets
+                .first()
+                .cloned()
+                .with_context(|| format!("no sheets in {}", path.display()))?
+        }
+    } else {
+        sheets
+            .first()
+            .cloned()
+            .with_context(|| format!("no sheets in {}", path.display()))?
+    };
     let display = format!("{}::{}", path.display(), sheet);
     eprintln!("loading {} …", display);
+
     let range = wb
         .worksheet_range(&sheet)
         .with_context(|| format!("read sheet {}", display))?;
@@ -547,3 +559,41 @@ pub fn uri_is_postgres(arg: &std::path::Path) -> Option<String> {
         None
     }
 }
+
+pub fn list_tables(path: &std::path::Path) -> Result<Vec<String>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "sqlite" | "sqlite3" | "db" => {
+            let conn = rusqlite::Connection::open(path)?;
+            let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+            let tables = stmt.query_map([], |r| r.get::<_, String>(0))?.filter_map(|r| r.ok()).collect();
+            Ok(tables)
+        }
+        "ddb" | "duckdb" => {
+            let conn = duckdb::Connection::open(path)?;
+            let mut stmt = conn.prepare("SELECT table_name FROM information_schema.tables WHERE table_schema='main' ORDER BY table_name")?;
+            let tables = stmt.query_map([], |r| r.get::<_, String>(0))?.filter_map(|r| r.ok()).collect();
+            Ok(tables)
+        }
+        "xlsx" | "xls" | "xlsm" | "xlsb" | "ods" => {
+            use calamine::Reader as _;
+            let wb = calamine::open_workbook_auto(path)?;
+            Ok(wb.sheet_names())
+        }
+        _ => {
+            if crate::data::sniff_db(path) == "sqlite" {
+                let conn = rusqlite::Connection::open(path)?;
+                let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+                let tables = stmt.query_map([], |r| r.get::<_, String>(0))?.filter_map(|r| r.ok()).collect();
+                Ok(tables)
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+

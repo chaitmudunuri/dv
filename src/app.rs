@@ -12,10 +12,12 @@ pub enum Overlay {
     None,
     Profile(usize),
     Help,
+    TablePicker { tables: Vec<String>, selected: usize },
 }
 
 pub struct App {
     pub data: Data,
+    pub source_path: Option<std::path::PathBuf>,
     pub sel: Cell,
     pub hcol: usize, // first visible column when horizontally scrolled
     pub chart_on: bool,
@@ -32,6 +34,17 @@ pub struct App {
     pub finding: Option<String>, // committed query (drives highlighting)
     pub hits: Vec<Cell>,
     pub hidx: usize, // index into hits of the current hit (usize::MAX = none)
+    // filter (f)
+    pub filter_mode: bool,
+    pub filter_input: String,
+    pub active_filter: Option<String>,
+    // export (e)
+    pub export_mode: bool,
+    pub export_input: String,
+    // bivariate charting (x)
+    pub x_col: Option<usize>,
+    // conditional formatting / heatmap (H)
+    pub heatmap: bool,
     pub pinned_cols: usize,
     pub col_widths: std::collections::HashMap<usize, usize>,
     pub msg: Option<(String, &'static str)>,
@@ -40,8 +53,13 @@ pub struct App {
 
 impl App {
     pub fn new(data: Data) -> Self {
+        Self::with_path(data, None)
+    }
+
+    pub fn with_path(data: Data, source_path: Option<std::path::PathBuf>) -> Self {
         App {
             data,
+            source_path,
             sel: Cell { row: 0, col: 0 },
             hcol: 0,
             chart_on: false,
@@ -56,12 +74,20 @@ impl App {
             finding: None,
             hits: Vec::new(),
             hidx: usize::MAX,
+            filter_mode: false,
+            filter_input: String::new(),
+            active_filter: None,
+            export_mode: false,
+            export_input: String::new(),
+            x_col: None,
+            heatmap: false,
             pinned_cols: 0,
             col_widths: std::collections::HashMap::new(),
             msg: None,
             quit: false,
         }
     }
+
 
 
     fn goto(&mut self, row: usize, col: usize) {
@@ -116,6 +142,48 @@ impl App {
         let cols = self.data.cols.len().max(1);
 
         if self.overlay != Overlay::None {
+            if let Overlay::TablePicker { tables, selected } = &mut self.overlay {
+                match ev.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => {
+                        self.overlay = Overlay::None;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if *selected == 0 {
+                            *selected = tables.len().saturating_sub(1);
+                        } else {
+                            *selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *selected = (*selected + 1) % tables.len().max(1);
+                    }
+                    KeyCode::Enter => {
+                        let target_table = tables[*selected].clone();
+                        self.overlay = Overlay::None;
+                        if let Some(src) = &self.source_path {
+                            let full_hint = format!("{}::{}", src.display(), target_table);
+                            match crate::data::load(std::path::Path::new(&full_hint)) {
+                                Ok(new_data) => {
+                                    self.data = new_data;
+                                    self.sel = Cell { row: 0, col: 0 };
+                                    self.hcol = 0;
+                                    self.chart_valid = false;
+                                    self.profiles.clear();
+                                    self.x_col = None;
+                                    self.active_filter = None;
+                                    self.msg = Some((format!("switched to table \"{}\"", target_table), "green"));
+                                }
+                                Err(e) => {
+                                    self.msg = Some((format!("failed to load table: {e}"), "red"));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
             match ev.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') | KeyCode::Enter => {
                     self.overlay = Overlay::None
@@ -145,7 +213,6 @@ impl App {
                             .map(|(row, col)| Cell { row, col })
                             .collect();
                         self.finding = Some(q);
-                        // first hit at/after the cursor, else first overall
                         self.hidx = match self
                             .hits
                             .iter()
@@ -175,10 +242,81 @@ impl App {
             }
             return;
         }
+
+        if self.filter_mode {
+            match ev.code {
+                KeyCode::Esc => {
+                    self.filter_mode = false;
+                    self.filter_input.clear();
+                }
+                KeyCode::Enter => {
+                    self.filter_mode = false;
+                    if self.filter_input.is_empty() {
+                        self.data.df = self.data.orig_df.clone();
+                        self.active_filter = None;
+                        self.sel = Cell { row: 0, col: 0 };
+                        self.chart_valid = false;
+                        self.profiles.clear();
+                        self.msg = Some(("filter cleared".to_string(), "ok"));
+                    } else {
+                        let q = self.filter_input.clone();
+                        match crate::data::filter_data(&self.data, &q) {
+                            Ok(filtered) => {
+                                let cnt = filtered.height();
+                                self.data.df = filtered;
+                                self.active_filter = Some(q);
+                                self.sel = Cell { row: 0, col: 0 };
+                                self.chart_valid = false;
+                                self.profiles.clear();
+                                self.msg = Some((format!("filtered: {} / {} rows", cnt, self.data.orig_df.height()), "green"));
+                            }
+                            Err(e) => {
+                                self.msg = Some((format!("filter error: {e}"), "red"));
+                            }
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.filter_input.pop();
+                }
+                KeyCode::Char(c) => self.filter_input.push(c),
+                _ => {}
+            }
+            return;
+        }
+
+        if self.export_mode {
+            match ev.code {
+                KeyCode::Esc => {
+                    self.export_mode = false;
+                    self.export_input.clear();
+                }
+                KeyCode::Enter => {
+                    self.export_mode = false;
+                    let target = self.export_input.clone();
+                    match crate::data::export(&self.data.df, &target) {
+                        Ok(()) => {
+                            self.msg = Some((format!("saved {} rows to {}", self.data.df.height(), target), "green"));
+                        }
+                        Err(e) => {
+                            self.msg = Some((format!("export failed: {e}"), "red"));
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.export_input.pop();
+                }
+                KeyCode::Char(c) => self.export_input.push(c),
+                _ => {}
+            }
+            return;
+        }
+
         if let Some((_, _)) = &self.msg {
             self.msg = None;
             return; // dismiss flash with any key
         }
+
 
 
 
@@ -198,11 +336,19 @@ impl App {
 
         match ev.code {
             KeyCode::Esc => {
-                // clear active search highlights
                 self.hits.clear();
                 self.finding = None;
                 self.hidx = usize::MAX;
+                if self.active_filter.is_some() {
+                    self.data.df = self.data.orig_df.clone();
+                    self.active_filter = None;
+                    self.sel = Cell { row: 0, col: 0 };
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                    self.msg = Some(("filter cleared".to_string(), "ok"));
+                }
             }
+
             KeyCode::Char('/') => {
                 self.search_mode = true;
                 self.search_input.clear();
@@ -246,17 +392,85 @@ impl App {
                 }
             }
             KeyCode::Char('u') => {
-                if self.data.sort_state.is_some() {
+                let filter_cleared = self.active_filter.is_some();
+                if filter_cleared {
+                    self.data.df = self.data.orig_df.clone();
+                    self.active_filter = None;
+                    self.sel = Cell { row: 0, col: 0 };
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                }
+                let sort_cleared = self.data.sort_state.is_some();
+                if sort_cleared {
                     self.data.reset_sort();
                     self.chart_valid = false;
                     self.profiles.clear();
+                }
+                if filter_cleared || sort_cleared {
                     if let Some(q) = &self.finding {
                         self.hits = crate::data::find_all(&self.data, q)
                             .into_iter()
                             .map(|(row, col)| Cell { row, col })
                             .collect();
                     }
-                    self.msg = Some(("reset sort order".to_string(), "ok"));
+                    let m = if filter_cleared && sort_cleared {
+                        "reset sort and filter"
+                    } else if sort_cleared {
+                        "reset sort order"
+                    } else {
+                        "reset filter"
+                    };
+                    self.msg = Some((m.to_string(), "ok"));
+                }
+            }
+            KeyCode::Char('x') => {
+                if self.x_col == Some(self.sel.col) {
+                    self.x_col = None;
+                    self.chart_valid = false;
+                    self.msg = Some(("unset X-axis (reset to row index)".to_string(), "ok"));
+                } else {
+                    self.x_col = Some(self.sel.col);
+                    self.chart_valid = false;
+                    let cname = &self.data.cols[self.sel.col].name;
+                    self.msg = Some((format!("set X-axis to \"{}\"", cname), "green"));
+                }
+            }
+            KeyCode::Char('H') => {
+                self.heatmap = !self.heatmap;
+                self.msg = Some((
+                    if self.heatmap {
+                        "heatmap mode ON"
+                    } else {
+                        "heatmap mode OFF"
+                    }
+                    .to_string(),
+                    "ok",
+                ));
+            }
+            KeyCode::Char('f') => {
+                self.filter_mode = true;
+                self.filter_input.clear();
+            }
+            KeyCode::Char('e') => {
+                self.export_mode = true;
+                let stem = self.data.name.split('.').next().unwrap_or("export");
+                self.export_input = format!("{}_export.csv", stem);
+            }
+            KeyCode::Char('m') => {
+                if let Some(src) = &self.source_path {
+                    match crate::sources::list_tables(src) {
+                        Ok(tables) if tables.len() > 1 => {
+                            self.overlay = Overlay::TablePicker { tables, selected: 0 };
+                        }
+                        Ok(_) => {
+                            self.msg = Some(("single-table file (no other tables)".to_string(), "ok"));
+                        }
+                        Err(e) => {
+                            self.msg = Some((format!("list tables failed: {e}"), "red"));
+                        }
+                    }
+                } else {
+                    self.msg = Some(("stdin input (no table picker available)".to_string(), "ok"));
                 }
             }
             KeyCode::Char('F') => {
@@ -328,6 +542,7 @@ impl App {
             KeyCode::Char('t') => self.chart_on = !self.chart_on,
             KeyCode::Char('c') => self.chart_kind = next_kind(self.chart_kind),
 
+
             KeyCode::PageDown => {
                 self.sel.row = (self.sel.row + 10).min(rows - 1);
                 self.chart_valid = false;
@@ -366,7 +581,7 @@ impl App {
                 self.sel.row = 0;
                 self.chart_valid = false;
             }
-            KeyCode::Char('G') | KeyCode::End | KeyCode::Char('e') => {
+            KeyCode::Char('G') | KeyCode::End => {
                 self.sel.row = rows - 1;
                 self.chart_valid = false;
             }

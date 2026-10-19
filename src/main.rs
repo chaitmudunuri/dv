@@ -74,6 +74,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut a = app::App::new(d);
+    let mut a = app::App::with_path(d, Some(path));
     ui::run(&mut a)
+
 }

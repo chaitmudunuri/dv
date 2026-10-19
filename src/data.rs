@@ -25,7 +25,14 @@ pub struct NumStats {
     pub mean: f64,
     pub std: f64,
     pub count: u64,
+    pub p25: f64,
+    pub p50: f64,
+    pub p75: f64,
+    pub p90: f64,
+    pub p99: f64,
+    pub iqr: f64,
 }
+
 
 #[derive(Debug, Clone)]
 pub struct ColInfo {
@@ -116,7 +123,7 @@ fn name_for(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn sniff_db(path: &Path) -> &'static str {
+pub(crate) fn sniff_db(path: &Path) -> &'static str {
     use std::io::Read;
     let mut magic = [0u8; 16];
     if let Ok(mut f) = std::fs::File::open(path) {
@@ -195,7 +202,8 @@ fn special_load(path: &Path, table_hint: Option<String>) -> Result<Option<Data>>
             let df = polars::io::avro::AvroReader::new(file).finish()?;
             build(df, false, name_for(path))?
         }
-        "xlsx" | "xls" | "xlsm" | "xlsb" | "ods" => crate::sources::load_excel(path)?,
+        "xlsx" | "xls" | "xlsm" | "xlsb" | "ods" => crate::sources::load_excel(path, table_hint)?,
+
         "db" | "sqlite" | "sqlite3" | "ddb" | "duckdb" => match sniff_db(path) {
             "sqlite" => crate::sources::load_sqlite(path, table_hint)?,
             _ => crate::sources::load_duckdb(path, table_hint)?,
@@ -372,8 +380,35 @@ pub fn profile(data: &Data, ci: usize) -> Profile {
                     };
                     bins[b.min(NBINS - 1)] += 1;
                 }
+                let mut sorted = v.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let quantile = |q: f64| -> f64 {
+                    if sorted.is_empty() {
+                        return 0.0;
+                    }
+                    let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
+                    sorted[idx.min(sorted.len() - 1)]
+                };
+                let p25 = quantile(0.25);
+                let p50 = quantile(0.50);
+                let p75 = quantile(0.75);
+                let p90 = quantile(0.90);
+                let p99 = quantile(0.99);
+                let iqr = p75 - p25;
                 (
-                    Some(NumStats { min: mn, max: mx, mean, std, count: n }),
+                    Some(NumStats {
+                        min: mn,
+                        max: mx,
+                        mean,
+                        std,
+                        count: n,
+                        p25,
+                        p50,
+                        p75,
+                        p90,
+                        p99,
+                        iqr,
+                    }),
                     Some(bins),
                 )
             }
@@ -398,7 +433,7 @@ pub fn profile(data: &Data, ci: usize) -> Profile {
     Profile { nulls, num, top, distinct, hist }
 }
 
-pub fn chart(data: &Data, ci: usize, k: ChartKind) -> Option<ChartData> {
+pub fn chart(data: &Data, ci: usize, k: ChartKind, x_col: Option<usize>) -> Option<ChartData> {
     let name = &data.cols[ci].name;
     let s = data.df.column(name).expect("col").as_materialized_series();
     let p = profile(data, ci);
@@ -409,16 +444,29 @@ pub fn chart(data: &Data, ci: usize, k: ChartKind) -> Option<ChartData> {
                 .zip(p.num)
                 .map(|(bins, stats)| ChartData::Hist { bins, stats }),
             ChartKind::Line | ChartKind::Scatter => {
-                let v = numbers(s);
-                let n = v.len();
+                let yv = numbers(s);
+                let n = yv.len();
                 if n == 0 {
                     return Some(ChartData::Series { pts: vec![] });
                 }
-                let stride = ((n as f64) / 720.0).ceil() as usize;
-                let pts: Vec<(f64, f64)> = (0..n)
-                    .step_by(stride)
-                    .map(|i| (i as f64, v[i]))
-                    .collect();
+                let mut pts: Vec<(f64, f64)> = if let Some(xi) = x_col {
+                    if xi < data.cols.len() && xi != ci {
+                        let xs = data.df.column(&data.cols[xi].name).expect("col").as_materialized_series();
+                        let xv = numbers(xs);
+                        let m = xv.len().min(yv.len());
+                        let stride = ((m as f64) / 720.0).ceil() as usize;
+                        (0..m).step_by(stride).map(|i| (xv[i], yv[i])).collect()
+                    } else {
+                        let stride = ((n as f64) / 720.0).ceil() as usize;
+                        (0..n).step_by(stride).map(|i| (i as f64, yv[i])).collect()
+                    }
+                } else {
+                    let stride = ((n as f64) / 720.0).ceil() as usize;
+                    (0..n).step_by(stride).map(|i| (i as f64, yv[i])).collect()
+                };
+                if k == ChartKind::Line && x_col.is_some() {
+                    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                }
                 Some(ChartData::Series { pts })
             }
             ChartKind::TopK => None,
@@ -430,6 +478,83 @@ pub fn chart(data: &Data, ci: usize, k: ChartKind) -> Option<ChartData> {
         }
     }
 }
+
+pub fn export(df: &DataFrame, path_str: &str) -> Result<()> {
+    let p = std::path::Path::new(path_str);
+    let mut file = std::fs::File::create(p)
+        .with_context(|| format!("create {}", p.display()))?;
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "parquet" | "pq" => {
+            ParquetWriter::new(file).finish(&mut df.clone())?;
+        }
+        "jsonl" | "ndjson" | "json" => {
+            JsonWriter::new(file)
+                .with_json_format(JsonFormat::JsonLines)
+                .finish(&mut df.clone())?;
+        }
+        _ => {
+            CsvWriter::new(&mut file).finish(&mut df.clone())?;
+        }
+    }
+    Ok(())
+}
+
+pub fn filter_data(data: &Data, query: &str) -> Result<DataFrame> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(data.orig_df.clone());
+    }
+    let ops = [">=", "<=", "!=", "=", ">", "<", ":"];
+    for op in ops {
+        if let Some(pos) = q.find(op) {
+            let col_name = q[..pos].trim();
+            let val_part = q[pos + op.len()..].trim();
+            if let Some(ci) = data.cols.iter().position(|c| c.name.eq_ignore_ascii_case(col_name)) {
+                let s = data.df.column(&data.cols[ci].name)?.as_materialized_series();
+                let kind = data.cols[ci].kind;
+                let mut matched_indices = Vec::new();
+                for r in 0..data.df.height() {
+                    let cell_str = cell_string(s, r, kind);
+                    let ok = match op {
+                        ">" | ">=" | "<" | "<=" => {
+                            if let (Ok(cv), Ok(pv)) = (cell_str.parse::<f64>(), val_part.parse::<f64>()) {
+                                match op {
+                                    ">" => cv > pv,
+                                    ">=" => cv >= pv,
+                                    "<" => cv < pv,
+                                    "<=" => cv <= pv,
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        "=" | "==" | ":" => cell_str.eq_ignore_ascii_case(val_part.trim_matches('"')),
+                        "!=" => !cell_str.eq_ignore_ascii_case(val_part.trim_matches('"')),
+                        _ => false,
+                    };
+                    if ok {
+                        matched_indices.push(r as u32);
+                    }
+                }
+                let idx_ca = UInt32Chunked::from_iter_values("idx".into(), matched_indices.into_iter());
+                return Ok(data.df.take(&idx_ca)?);
+            }
+        }
+    }
+
+    let needle = q.to_lowercase();
+    let hits = find_all(data, &needle);
+    let row_set: std::collections::BTreeSet<u32> = hits.into_iter().map(|(r, _)| r as u32).collect();
+    let idx_ca = UInt32Chunked::from_iter_values("idx".into(), row_set.into_iter());
+    Ok(data.df.take(&idx_ca)?)
+}
+
 
 /// All cells (row-major) whose rendered text contains `q`, case-insensitive.
 pub fn find_all(data: &Data, q: &str) -> Vec<(usize, usize)> {
