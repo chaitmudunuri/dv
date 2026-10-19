@@ -1,0 +1,23 @@
+[package]
+name = "dv"
+version = "0.1.0"
+edition = "2024"
+description = "VisiCalc-style instant visualization of data files (csv, parquet, arrow) in the terminal"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
+polars = { version = "0.46", features = ["csv", "parquet", "ipc", "json", "avro", "lazy", "dtype-date", "dtype-datetime", "decompress", "strings"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+unicode-width = "0.2"
+calamine = { version = "0.37", features = ["chrono"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+duckdb = { version = "1", features = ["bundled"] }
+postgres = "0.19"
+flate2 = "1"
+
+
+[profile.release]
+lto = "thin"
+strip = true
