@@ -1,6 +1,7 @@
 # dv
 
-VisiCalc-style quick visualization of data files, right in your terminal.
+Terminal data visualizer — an interactive TUI spreadsheet for quick
+charting and browsing of data files.
 
 ```sh
 dv data.csv
