@@ -109,3 +109,50 @@ fn search_no_hits_zero_chip_and_no_panic() {
     assert!(s.contains("/zzz 0 hits"), "zero-hit chip shows after dismissal");
     assert!(s.contains("[n] next hit"), "no keys-line regression");
 }
+
+#[test]
+fn sorting_asc_desc_and_undo() {
+    let s = render("samples/demo.csv", &['s']);
+    assert!(s.contains("A▲"), "A▲ in header when sorted asc");
+    assert!(s.contains("sorted by"), "flash msg confirms asc sort");
+
+    let s = render("samples/demo.csv", &['S']);
+    assert!(s.contains("A▼"), "A▼ in header when sorted desc");
+    assert!(s.contains("sorted by"), "flash msg confirms desc sort");
+
+    let s = render("samples/demo.csv", &['s', 'r', 'u']);
+    assert!(!s.contains("A▲") && !s.contains("A▼"), "header reset after undo sort");
+    assert!(s.contains("reset sort order"), "flash msg confirms undo");
+}
+
+#[test]
+fn column_pinning_and_freeze() {
+    let s = render("samples/demo.csv", &['F']);
+    assert!(s.contains("pinned 1 col"), "flash msg on pin");
+    assert!(s.contains('│'), "vertical separator divider rendered for pinned col");
+
+    let s = render("samples/demo.csv", &['F', 'r', 'F']);
+    assert!(s.contains("unpinned"), "flash msg on unpin");
+    assert!(!s.contains('│'), "separator removed after unpin");
+}
+
+#[test]
+fn column_width_adjustment() {
+    let s = render("samples/demo.csv", &['>']);
+    assert!(s.contains("col width:"), "widened col width message");
+
+    let s = render("samples/demo.csv", &['>', 'r', '=']);
+    assert!(s.contains("reset col width to auto"), "reset col width message");
+
+
+}
+
+#[test]
+fn clipboard_yank_cell_and_row() {
+    let s = render("samples/demo.csv", &['y']);
+    assert!(s.contains("yanked cell"), "cell yank message");
+
+    let s = render("samples/demo.csv", &['Y']);
+    assert!(s.contains("yanked row"), "row yank message");
+}
+

@@ -58,7 +58,8 @@ fn fmt_num(v: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-fn trunc(s: &str, w: usize) -> String {
+pub fn trunc(s: &str, w: usize) -> String {
+
     if w == 0 {
         return String::new();
     }
@@ -187,6 +188,44 @@ struct ColBlock {
     cells: Vec<String>,
 }
 
+fn build_one_col(
+    app: &App,
+    ci: usize,
+    scroll_row: usize,
+    rows_v: usize,
+    avail: usize,
+) -> Option<ColBlock> {
+    if avail < 3 {
+        return None;
+    }
+    let name = app.data.cols[ci].name.clone();
+    let s = app
+        .data
+        .df
+        .column(name.as_str())
+        .ok()?
+        .as_materialized_series()
+        .clone();
+    let kind = app.data.cols[ci].kind;
+    let mut cells = Vec::with_capacity(rows_v);
+    for r in scroll_row..(scroll_row + rows_v).min(app.data.df.height()) {
+        let mut t = crate::data::cell_string(&s, r, kind);
+        t.replace_in_place();
+        cells.push(t);
+    }
+    let w = if let Some(&ow) = app.col_widths.get(&ci) {
+        ow.min(avail)
+    } else {
+        let mut w = cells.iter().map(|c| c.width()).max().unwrap_or(0);
+        w = w.max(col_letter(ci).width() + 2).max(4).min(24);
+        w.min(avail)
+    };
+    if w == 0 {
+        return None;
+    }
+    Some(ColBlock { ci, w, cells })
+}
+
 fn build_cols(
     app: &App,
     scroll_row: usize,
@@ -197,32 +236,40 @@ fn build_cols(
 ) -> Vec<ColBlock> {
     let mut out = Vec::new();
     let mut used = gutter as u16;
-    let mut ci = start;
-    while ci < app.data.cols.len() {
-        let name = app.data.cols[ci].name.clone();
-        let s = app
-            .data
-            .df
-            .column(name.as_str())
-            .expect("columns are stable")
-            .as_materialized_series();
-        let kind = app.data.cols[ci].kind;
-        let mut cells = Vec::with_capacity(rows_v);
-        for r in scroll_row..(scroll_row + rows_v).min(app.data.df.height()) {
-            let mut t = crate::data::cell_string(s, r, kind);
-            t.replace_in_place();
-            cells.push(t);
-        }
-        let mut w = cells.iter().map(|c| c.width()).max().unwrap_or(0);
-        w = w.max(col_letter(ci).width() + 2).max(4).min(24);
+    let pinned = app.pinned_cols.min(app.data.cols.len());
+
+    // 1. Pinned columns first (0..pinned)
+    for ci in 0..pinned {
         let avail = width.saturating_sub(used);
-        if avail < 5 {
+        if avail < 4 {
             break;
         }
-        let w = w.min(avail as usize - 1);
-        used += (w + 1) as u16;
-        out.push(ColBlock { ci, w, cells });
-        ci += 1;
+        if let Some(cb) = build_one_col(app, ci, scroll_row, rows_v, (avail as usize).saturating_sub(1)) {
+            used += (cb.w + 1) as u16;
+            out.push(cb);
+        } else {
+            break;
+        }
+    }
+
+    if pinned > 0 && !out.is_empty() {
+        used += 1;
+    }
+
+    // 2. Unpinned columns (start.max(pinned)..app.data.cols.len())
+    let mut ci = start.max(pinned);
+    while ci < app.data.cols.len() {
+        let avail = width.saturating_sub(used);
+        if avail < 4 {
+            break;
+        }
+        if let Some(cb) = build_one_col(app, ci, scroll_row, rows_v, (avail as usize).saturating_sub(1)) {
+            used += (cb.w + 1) as u16;
+            out.push(cb);
+            ci += 1;
+        } else {
+            break;
+        }
     }
     out
 }
@@ -259,13 +306,9 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         0
     };
 
+    let pinned = app.pinned_cols.min(app.data.cols.len());
     let mut cols = build_cols(app, scroll_row, data_rows_v, app.hcol, area.width, gutter);
-    if !cols.is_empty() {
-        if app.sel.col > cols.last().unwrap().ci { // cursor scrolled out right edge
-            app.hcol = app.sel.col;
-            cols = build_cols(app, scroll_row, data_rows_v, app.hcol, area.width, gutter);
-        }
-    } else {
+    if !cols.iter().any(|c| c.ci == app.sel.col) {
         app.hcol = app.sel.col;
         cols = build_cols(app, scroll_row, data_rows_v, app.hcol, area.width, gutter);
     }
@@ -276,15 +319,24 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     // header letter row (VisiCalc-style A, B, C …)
     let mut spans = vec![Span::styled(" ".repeat(gutter), DIM)];
-    for c in &cols {
-        let letter = col_letter(c.ci);
+    for (idx, c) in cols.iter().enumerate() {
+        let mut letter = col_letter(c.ci);
+        if let Some((sci, asc)) = app.data.sort_state {
+            if sci == c.ci {
+                letter.push(if asc { '▲' } else { '▼' });
+            }
+        }
         let style = if c.ci == app.sel.col {
             Style::new().bg(Color::Rgb(120, 120, 40)).fg(Color::Black).add_modifier(Modifier::BOLD)
         } else {
             DIM
         };
         spans.push(Span::styled(pad_align(letter, c.w, true), style));
-        spans.push(Span::raw(" "));
+        if pinned > 0 && c.ci + 1 == pinned && idx + 1 < cols.len() {
+            spans.push(Span::styled("│", Style::new().fg(Color::Cyan)));
+        } else {
+            spans.push(Span::raw(" "));
+        }
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)),
@@ -297,7 +349,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         if row >= rows_total {
             break;
         }
-        let mut spans = Vec::with_capacity(cols.len() + 1);
+        let mut spans = Vec::with_capacity(cols.len() * 2 + 1);
         let num = (row + 1).to_string();
         let row_style = if row == app.sel.row {
             CURSOR
@@ -305,10 +357,10 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             DIM
         };
         spans.push(Span::styled(pad_align(num, gutter, true), row_style));
-        for c in &cols {
+        for (idx, c) in cols.iter().enumerate() {
             let text = c.cells.get(rel).cloned().unwrap_or_default();
             let right = app.data.cols[c.ci].kind == ColKind::Number;
-            let cell = format!("{} ", pad_align(text.clone(), c.w, right));
+            let cell = pad_align(text.clone(), c.w, right);
             let is_hit = app
                 .finding
                 .as_ref()
@@ -325,6 +377,11 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 Style::new()
             };
             spans.push(Span::styled(cell, style));
+            if pinned > 0 && c.ci + 1 == pinned && idx + 1 < cols.len() {
+                spans.push(Span::styled("│", Style::new().fg(Color::Cyan)));
+            } else {
+                spans.push(Span::raw(" "));
+            }
         }
         f.render_widget(
             Paragraph::new(Line::from(spans)),
@@ -332,6 +389,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         );
     }
 }
+
 
 // ---------- chart pane ----------
 
@@ -614,8 +672,10 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let keys = if app.search_mode {
         ""
     } else {
-        " [j k l h] move · [/] search · [n] next hit · [p] profile · [c] chart type · [t] toggle chart · [g/G] top/bottom · [?] help · [q] quit "
+        " [j k l h] move · [/] search · [n] next hit · [s/S/u] sort · [F] freeze · [< > =] width · [y/Y] yank · [p] profile · [c] chart · [?] help · [q] quit "
     };
+
+
     f.render_widget(Paragraph::new(vec![line1]), Rect { height: 1, ..area });
     f.render_widget(
         Paragraph::new(Span::styled(keys, DIM)),
@@ -729,6 +789,10 @@ const HELP: &[(&str, &str)] = &[
     ("/", "search prompts for text"),
     ("n / N", "next / previous search hit"),
     ("esc", "clear search hits"),
+    ("s / S / u", "sort asc / desc / reset sort"),
+    ("F", "freeze / unfreeze columns up to cursor"),
+    ("< / > / =", "shrink / widen / reset column width"),
+    ("y / Y", "yank cell / row as CSV to clipboard"),
     ("g / G", "jump to top / bottom row"),
     ("PgUp / PgDn", "page 10 rows"),
     ("p", "profile column under cursor"),
@@ -738,6 +802,7 @@ const HELP: &[(&str, &str)] = &[
     ("q", "quit"),
     ("?", "this help"),
 ];
+
 
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
     let rects = popup(area, 60, 60);

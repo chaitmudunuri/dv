@@ -34,6 +34,14 @@ specific one with a `::table` suffix, e.g. `dv demo.duckdb::tips`.
 |---|---|
 | `h j k l` / arrows | move cursor |
 | `Tab` / `BackTab` | next / previous cell |
+| `/` | search text across cells |
+| `n` / `N` | next / previous search hit |
+| `s` / `S` | sort column ascending / descending |
+| `u` | reset sort order to original |
+| `F` | freeze / unfreeze columns up to cursor |
+| `<` / `>` | shrink / widen column width |
+| `=` | reset column width to auto-fit |
+| `y` / `Y` | yank cell / row as CSV to clipboard |
 | `g` / `G` | jump to top / bottom row |
 | `PgUp` / `PgDn` | page 10 rows |
 | `p` | profile the column under the cursor |
@@ -42,6 +50,7 @@ specific one with a `::table` suffix, e.g. `dv demo.duckdb::tips`.
 | `0` | jump to first column |
 | `?` | help |
 | `q` | quit |
+
 
 Numeric columns show a histogram, line, or dot plot; text and bool
 columns show a TOP-K bar chart.

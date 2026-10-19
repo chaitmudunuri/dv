@@ -32,6 +32,8 @@ pub struct App {
     pub finding: Option<String>, // committed query (drives highlighting)
     pub hits: Vec<Cell>,
     pub hidx: usize, // index into hits of the current hit (usize::MAX = none)
+    pub pinned_cols: usize,
+    pub col_widths: std::collections::HashMap<usize, usize>,
     pub msg: Option<(String, &'static str)>,
     pub quit: bool,
 }
@@ -54,10 +56,13 @@ impl App {
             finding: None,
             hits: Vec::new(),
             hidx: usize::MAX,
+            pinned_cols: 0,
+            col_widths: std::collections::HashMap::new(),
             msg: None,
             quit: false,
         }
     }
+
 
     fn goto(&mut self, row: usize, col: usize) {
         self.sel.row = row;
@@ -175,6 +180,8 @@ impl App {
             return; // dismiss flash with any key
         }
 
+
+
         if ev.modifiers.contains(KeyModifiers::CONTROL) {
             match ev.code {
                 KeyCode::Char('c') | KeyCode::Char('d') => self.quit = true,
@@ -204,9 +211,123 @@ impl App {
             KeyCode::Char('N') => self.step_hit(false),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help,
+            KeyCode::Char('s') => {
+                let ci = self.sel.col;
+                if let Err(e) = self.data.sort_by_col(ci, true) {
+                    self.msg = Some((format!("sort failed: {e}"), "red"));
+                } else {
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                    if let Some(q) = &self.finding {
+                        self.hits = crate::data::find_all(&self.data, q)
+                            .into_iter()
+                            .map(|(row, col)| Cell { row, col })
+                            .collect();
+                    }
+                    let cname = &self.data.cols[ci].name;
+                    self.msg = Some((format!("sorted by \"{}\" asc [▲]", cname), "green"));
+                }
+            }
+            KeyCode::Char('S') => {
+                let ci = self.sel.col;
+                if let Err(e) = self.data.sort_by_col(ci, false) {
+                    self.msg = Some((format!("sort failed: {e}"), "red"));
+                } else {
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                    if let Some(q) = &self.finding {
+                        self.hits = crate::data::find_all(&self.data, q)
+                            .into_iter()
+                            .map(|(row, col)| Cell { row, col })
+                            .collect();
+                    }
+                    let cname = &self.data.cols[ci].name;
+                    self.msg = Some((format!("sorted by \"{}\" desc [▼]", cname), "green"));
+                }
+            }
+            KeyCode::Char('u') => {
+                if self.data.sort_state.is_some() {
+                    self.data.reset_sort();
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                    if let Some(q) = &self.finding {
+                        self.hits = crate::data::find_all(&self.data, q)
+                            .into_iter()
+                            .map(|(row, col)| Cell { row, col })
+                            .collect();
+                    }
+                    self.msg = Some(("reset sort order".to_string(), "ok"));
+                }
+            }
+            KeyCode::Char('F') => {
+                if self.pinned_cols > 0 {
+                    self.pinned_cols = 0;
+                    self.msg = Some(("unpinned columns".to_string(), "ok"));
+                } else {
+                    let count = (self.sel.col + 1).min(self.data.cols.len());
+                    self.pinned_cols = count;
+                    self.msg = Some((
+                        format!("pinned {} col{}", count, if count == 1 { "" } else { "s" }),
+                        "green",
+                    ));
+                }
+            }
+            KeyCode::Char('<') => {
+                let ci = self.sel.col;
+                let cur = self.col_widths.get(&ci).copied().unwrap_or(12);
+                let new_w = cur.saturating_sub(2).max(3);
+                self.col_widths.insert(ci, new_w);
+                self.msg = Some((format!("col width: {}", new_w), "ok"));
+            }
+            KeyCode::Char('>') => {
+                let ci = self.sel.col;
+                let cur = self.col_widths.get(&ci).copied().unwrap_or(12);
+                let new_w = (cur + 2).min(80);
+                self.col_widths.insert(ci, new_w);
+                self.msg = Some((format!("col width: {}", new_w), "ok"));
+            }
+            KeyCode::Char('=') => {
+                let ci = self.sel.col;
+                if self.col_widths.remove(&ci).is_some() {
+                    self.msg = Some(("reset col width to auto".to_string(), "ok"));
+                }
+            }
+            KeyCode::Char('y') => {
+                if !self.data.cols.is_empty() && self.data.df.height() > 0 {
+                    let colname = &self.data.cols[self.sel.col].name;
+                    let kind = self.data.cols[self.sel.col].kind;
+                    if let Ok(col) = self.data.df.column(colname) {
+                        let s = col.as_materialized_series();
+                        let text = crate::data::cell_string(s, self.sel.row, kind);
+                        crate::clipboard::copy_to_clipboard(&text);
+                        let preview = crate::ui::trunc(&text, 20);
+                        self.msg = Some((format!("yanked cell: \"{}\"", preview), "green"));
+                    }
+                }
+            }
+            KeyCode::Char('Y') => {
+                if !self.data.cols.is_empty() && self.data.df.height() > 0 {
+                    let mut row_vals = Vec::new();
+                    for c in &self.data.cols {
+                        if let Ok(col) = self.data.df.column(&c.name) {
+                            let s = col.as_materialized_series();
+                            let val = crate::data::cell_string(s, self.sel.row, c.kind);
+                            if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+                                row_vals.push(format!("\"{}\"", val.replace('"', "\"\"")));
+                            } else {
+                                row_vals.push(val);
+                            }
+                        }
+                    }
+                    let line = row_vals.join(",");
+                    crate::clipboard::copy_to_clipboard(&line);
+                    self.msg = Some((format!("yanked row {} as CSV", self.sel.row + 1), "green"));
+                }
+            }
             KeyCode::Char('p') => self.overlay = Overlay::Profile(self.sel.col),
             KeyCode::Char('t') => self.chart_on = !self.chart_on,
             KeyCode::Char('c') => self.chart_kind = next_kind(self.chart_kind),
+
             KeyCode::PageDown => {
                 self.sel.row = (self.sel.row + 10).min(rows - 1);
                 self.chart_valid = false;

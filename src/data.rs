@@ -35,9 +35,12 @@ pub struct ColInfo {
 
 pub struct Data {
     pub df: DataFrame,
+    pub orig_df: DataFrame,
     pub cols: Vec<ColInfo>,
     pub name: String,
+    pub sort_state: Option<(usize, bool)>, // (col_idx, ascending)
 }
+
 
 #[derive(Debug, Clone)]
 pub struct Profile {
@@ -275,8 +278,37 @@ pub fn build(mut df: DataFrame, _from_stdin: bool, name: String) -> Result<Data>
             kind: kind_of(&dt),
         });
     }
-    Ok(Data { df, cols, name })
+    let orig_df = df.clone();
+    Ok(Data {
+        df,
+        orig_df,
+        cols,
+        name,
+        sort_state: None,
+    })
 }
+
+impl Data {
+    pub fn sort_by_col(&mut self, col_idx: usize, ascending: bool) -> Result<()> {
+        if col_idx >= self.cols.len() {
+            return Ok(());
+        }
+        let col_name = self.cols[col_idx].name.clone();
+        let sorted = self.df.sort(
+            [col_name.as_str()],
+            SortMultipleOptions::default().with_order_descending(!ascending),
+        )?;
+        self.df = sorted;
+        self.sort_state = Some((col_idx, ascending));
+        Ok(())
+    }
+
+    pub fn reset_sort(&mut self) {
+        self.df = self.orig_df.clone();
+        self.sort_state = None;
+    }
+}
+
 
 // ---- value extraction ----
 
