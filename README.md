@@ -49,6 +49,17 @@ columns show a TOP-K bar chart.
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/chaitmudunuri/dv/master/install.sh | sh
+```
+
+Prebuilt binaries (linux x86_64/arm64, macOS x86_64/arm64, windows x86_64)
+are attached to each [release](https://github.com/chaitmudunuri/dv/releases);
+grab `dv-windows-x86_64.zip` from there on Windows. To install to another
+location: `DV_INSTALL_DIR=/usr/local/bin curl -fsSL … | sh`.
+
+Or from source:
+
+```sh
 git clone https://github.com/chaitmudunuri/dv.git
 cd dv
 cargo install --path .
