@@ -1,25 +1,40 @@
-use crate::app::{App, Overlay};
+use crate::app::{App, ChartLayout, Overlay};
 use crate::data::{ChartData, ChartKind, ColKind, Profile};
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Borders, Chart, Clear, Dataset, GraphType, Paragraph};
+use ratatui::widgets::{
+    Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::{symbols, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BLOCKS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-const DIM: Style = Style::new().fg(Color::DarkGray);
-const NUM_FG: Style = Style::new().fg(Color::Cyan);
+// Catppuccin-inspired modern palette
+const BG_HEADER: Color = Color::Rgb(49, 50, 68);
+const TEXT_PRIMARY: Color = Color::Rgb(205, 214, 244);
+const TEXT_MUTED: Color = Color::Rgb(147, 153, 178);
+const BORDER_COLOR: Color = Color::Rgb(88, 91, 112);
+const ACCENT_CYAN: Color = Color::Rgb(137, 220, 235);
+const ACCENT_PEACH: Color = Color::Rgb(250, 179, 135);
+const ACCENT_MAUVE: Color = Color::Rgb(203, 166, 247);
+const ACCENT_GREEN: Color = Color::Rgb(166, 227, 161);
+const ACCENT_YELLOW: Color = Color::Rgb(249, 226, 175);
+const ACCENT_RED: Color = Color::Rgb(243, 139, 168);
+
+const DIM: Style = Style::new().fg(TEXT_MUTED);
+const NUM_FG: Style = Style::new().fg(ACCENT_CYAN);
 const CURSOR: Style = Style::new()
-    .bg(Color::Rgb(70, 120, 220))
-    .fg(Color::Black)
+    .bg(Color::Rgb(69, 71, 90))
+    .fg(Color::Rgb(245, 224, 220))
     .add_modifier(Modifier::BOLD);
 const HIT: Style = Style::new()
-    .bg(Color::Rgb(140, 90, 0))
-    .fg(Color::White)
+    .bg(ACCENT_YELLOW)
+    .fg(Color::Black)
     .add_modifier(Modifier::BOLD);
 
 // ---------- helpers ----------
@@ -122,7 +137,7 @@ pub fn run(app: &mut App) -> anyhow::Result<()> {
     crossterm::execute!(
         &mut stdout,
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        crossterm::event::EnableMouseCapture
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
     let tick = std::time::Duration::from_millis(80);
@@ -135,6 +150,9 @@ pub fn run(app: &mut App) -> anyhow::Result<()> {
                 {
                     app.handle_key(k)
                 }
+                crossterm::event::Event::Mouse(m) => {
+                    app.handle_mouse(m);
+                }
                 _ => {}
             }
         }
@@ -142,6 +160,7 @@ pub fn run(app: &mut App) -> anyhow::Result<()> {
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         term.backend_mut(),
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen
     )?;
     Ok(())
@@ -159,17 +178,28 @@ pub fn render_frame(f: &mut ratatui::Frame, app: &mut App) {
 
     let overlays_none = app.overlay == Overlay::None;
     let (grid, chart_area) = if app.chart_on && overlays_none {
-        let gh = (main.height * 5 / 8).max(4).min(main.height - 3);
-        (
-            Rect { height: gh, ..main },
-            Rect { y: main.y + gh, height: main.height - gh, ..main },
-        )
+        match app.chart_layout {
+            ChartLayout::Bottom => {
+                let gh = (main.height * 5 / 8).max(4).min(main.height - 3);
+                (
+                    Rect { height: gh, ..main },
+                    Rect { y: main.y + gh, height: main.height - gh, ..main },
+                )
+            }
+            ChartLayout::Right => {
+                let gw = (main.width * 5 / 8).max(20).min(main.width.saturating_sub(20));
+                (
+                    Rect { width: gw, ..main },
+                    Rect { x: main.x + gw, width: main.width - gw, ..main },
+                )
+            }
+        }
     } else {
         (main, Rect::default())
     };
 
     draw_grid(f, grid, app);
-    if app.chart_on && overlays_none && chart_area.height > 3 {
+    if app.chart_on && overlays_none && (chart_area.height > 3 || chart_area.width > 10) {
         draw_chart_pane(f, chart_area, app);
     }
     draw_status(f, status, app);
@@ -177,6 +207,7 @@ pub fn render_frame(f: &mut ratatui::Frame, app: &mut App) {
         Overlay::Profile(ci) => draw_profile(f, area, app, *ci),
         Overlay::Help => draw_help(f, area),
         Overlay::TablePicker { tables, selected } => draw_table_picker(f, area, tables, *selected),
+        Overlay::CommandPalette { query, selected } => draw_command_palette(f, area, query, *selected),
         Overlay::None => {}
     }
 }
@@ -332,13 +363,13 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             letter = format!("{}[X]", letter);
         }
         let style = if c.ci == app.sel.col {
-            Style::new().bg(Color::Rgb(120, 120, 40)).fg(Color::Black).add_modifier(Modifier::BOLD)
+            Style::new().bg(ACCENT_PEACH).fg(Color::Black).add_modifier(Modifier::BOLD)
         } else {
-            DIM
+            Style::new().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)
         };
         spans.push(Span::styled(pad_align(letter, c.w, true), style));
         if pinned > 0 && c.ci + 1 == pinned && idx + 1 < cols.len() {
-            spans.push(Span::styled("│", Style::new().fg(Color::Cyan)));
+            spans.push(Span::styled("│", Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)));
         } else {
             spans.push(Span::raw(" "));
         }
@@ -357,7 +388,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         let mut spans = Vec::with_capacity(cols.len() * 2 + 1);
         let num = (row + 1).to_string();
         let row_style = if row == app.sel.row {
-            CURSOR
+            Style::new().fg(ACCENT_PEACH).add_modifier(Modifier::BOLD)
         } else {
             DIM
         };
@@ -366,18 +397,15 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             let text = c.cells.get(rel).cloned().unwrap_or_default();
             let right = app.data.cols[c.ci].kind == ColKind::Number;
             let cell = pad_align(text.clone(), c.w, right);
-            let is_hit = app
-                .finding
-                .as_ref()
-                .map(|q| {
-                    let lq = q.to_lowercase();
-                    text.to_lowercase().contains(&lq)
-                })
-                .unwrap_or(false);
+            let is_hit = (app.search_mode && !app.search_input.is_empty() && text.to_lowercase().contains(&app.search_input.to_lowercase()))
+                || app.finding.as_ref().map(|q| text.to_lowercase().contains(&q.to_lowercase())).unwrap_or(false);
+            let is_null = text.is_empty() || text == "null";
             let style = if c.ci == app.sel.col && row == app.sel.row {
                 CURSOR
             } else if is_hit {
                 HIT
+            } else if is_null {
+                DIM
             } else if app.heatmap && app.data.cols[c.ci].kind == ColKind::Number {
                 if let Ok(v) = text.trim().parse::<f64>() {
                     let st = app.profile(c.ci).num;
@@ -385,13 +413,13 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                         if st.max > st.min {
                             let ratio = ((v - st.min) / (st.max - st.min)).clamp(0.0, 1.0);
                             let (fg, bg) = if ratio < 0.25 {
-                                (Color::Cyan, Color::Rgb(15, 30, 60))
+                                (ACCENT_CYAN, Color::Rgb(25, 40, 55))
                             } else if ratio < 0.50 {
-                                (Color::Green, Color::Rgb(20, 50, 40))
+                                (ACCENT_GREEN, Color::Rgb(30, 50, 40))
                             } else if ratio < 0.75 {
-                                (Color::Yellow, Color::Rgb(60, 60, 20))
+                                (ACCENT_YELLOW, Color::Rgb(55, 50, 25))
                             } else {
-                                (Color::Rgb(255, 120, 120), Color::Rgb(80, 20, 20))
+                                (ACCENT_RED, Color::Rgb(65, 30, 40))
                             };
                             Style::new().fg(fg).bg(bg)
                         } else {
@@ -408,7 +436,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             };
             spans.push(Span::styled(cell, style));
             if pinned > 0 && c.ci + 1 == pinned && idx + 1 < cols.len() {
-                spans.push(Span::styled("│", Style::new().fg(Color::Cyan)));
+                spans.push(Span::styled("│", Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)));
             } else {
                 spans.push(Span::raw(" "));
             }
@@ -419,6 +447,20 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Rect { y: area.y + rel as u16 + 1, height: 1, ..area },
         );
     }
+
+    // Modern vertical scrollbar
+    let mut scrollbar_state = ScrollbarState::new(rows_total.saturating_sub(1)).position(app.sel.row);
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("█")
+            .style(Style::new().fg(BORDER_COLOR)),
+        Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area },
+        &mut scrollbar_state,
+    );
 }
 
 
@@ -501,8 +543,9 @@ fn draw_chart_pane(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(Line::from(title))
-        .border_style(DIM);
+        .border_style(Style::new().fg(BORDER_COLOR));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width < 4 || inner.height < 1 {
@@ -669,39 +712,47 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         Line::from(vec![
             Span::styled(
                 " search ",
-                Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" /{}", app.search_input), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" /{}", app.search_input), Style::new().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if app.search_input.is_empty() {
+                    "".to_string()
+                } else {
+                    format!("  [{} hit{}]", app.hits.len(), if app.hits.len() == 1 { "" } else { "s" })
+                },
+                Style::new().fg(ACCENT_YELLOW).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  [enter] find · [esc] cancel ", DIM),
         ])
     } else if app.filter_mode {
         Line::from(vec![
             Span::styled(
                 " filter ",
-                Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::new().fg(Color::Black).bg(ACCENT_CYAN).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", app.filter_input), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", app.filter_input), Style::new().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled("  text or col>val · [enter] apply (blank resets) · [esc] cancel ", DIM),
         ])
     } else if app.export_mode {
         Line::from(vec![
             Span::styled(
                 " export ",
-                Style::new().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::new().fg(Color::Black).bg(ACCENT_GREEN).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", app.export_input), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", app.export_input), Style::new().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled("  filename (.csv, .parquet, .jsonl) · [enter] export · [esc] cancel ", DIM),
         ])
     } else if let Some((m, c)) = app.msg.clone() {
         Line::from(vec![Span::styled(
             format!(" {} ", m),
-            Style::new().fg(Color::Black).bg(color_for(c)),
+            Style::new().fg(Color::Black).bg(color_for(c)).add_modifier(Modifier::BOLD),
         )])
     } else {
         let mut spans = vec![
             Span::styled(
                 format!(" {} ", app.data.name),
-                Style::new().add_modifier(Modifier::BOLD),
+                Style::new().bg(BG_HEADER).fg(Color::White).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("· {}x{} ", app.data.df.height(), app.data.cols.len()),
@@ -720,13 +771,13 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             let v = crate::data::cell_string(s, row, kind);
             spans.push(Span::styled(
                 format!("· {}{} ", col_letter(ci), row + 1),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::new().fg(ACCENT_PEACH).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 format!("{}=", colname),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(ACCENT_PEACH),
             ));
-            spans.push(Span::styled(v, Style::new().add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(v, Style::new().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)));
         }
         if let Some(q) = &app.finding {
             spans.push(Span::styled(
@@ -735,35 +786,43 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 } else {
                     format!(" · /{q} {} hit{} ", app.hits.len(), if app.hits.len() == 1 { "" } else { "s" })
                 },
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(ACCENT_YELLOW).add_modifier(Modifier::BOLD),
             ));
         }
         if let Some(f) = &app.active_filter {
             spans.push(Span::styled(
                 format!(" · [filter: {f}]"),
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD),
             ));
         }
         if let Some(xi) = app.x_col {
             if xi < app.data.cols.len() {
                 spans.push(Span::styled(
                     format!(" · [X: {}]", app.data.cols[xi].name),
-                    Style::new().fg(Color::Green),
+                    Style::new().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD),
                 ));
             }
         }
         if app.heatmap {
             spans.push(Span::styled(
                 " · [HEATMAP]",
-                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::new().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD),
             ));
+        }
+        let pct_pos = if app.data.df.height() > 0 {
+            format!(" · {}%", (row + 1) * 100 / app.data.df.height())
+        } else {
+            String::new()
+        };
+        if !pct_pos.is_empty() {
+            spans.push(Span::styled(pct_pos, DIM));
         }
         Line::from(spans)
     };
     let keys = if app.search_mode || app.filter_mode || app.export_mode {
         ""
     } else {
-        " [j k l h] move · [/] search · [n] next hit · [f] filter · [s/S/u] sort · [F] freeze · [H] heatmap · [e] export · [m] tables · [p] profile · [c] chart · [?] help · [q] quit "
+        " [:] palette · [j k l h] move · [/] search · [n] next hit · [f] filter · [s/S/u] sort · [F] freeze · [H] heatmap · [e] export · [m] tables · [p] profile · [c] chart · [?] help · [q] quit "
     };
 
 
@@ -776,9 +835,9 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 fn color_for(c: &str) -> Color {
     match c {
-        "red" => Color::Red,
-        "green" => Color::Green,
-        _ => Color::Yellow,
+        "red" => ACCENT_RED,
+        "green" => ACCENT_GREEN,
+        _ => ACCENT_YELLOW,
     }
 }
 
@@ -802,13 +861,14 @@ fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
     f.render_widget(Clear, rects);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(Line::from(vec![
             Span::styled(
                 format!(" PROFILE {} {} ", col_letter(ci), col.name),
-                Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD),
             ),
         ]))
-        .border_style(DIM);
+        .border_style(Style::new().fg(BORDER_COLOR));
     let inner = block.inner(rects);
     f.render_widget(block, rects);
     let mut lines = Vec::new();
@@ -819,7 +879,7 @@ fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
         ColKind::Text => "TXT",
     };
     lines.push(Line::from(vec![
-        Span::styled(format!(" {} ", kindtag), Style::new().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {} ", kindtag), Style::new().bg(ACCENT_CYAN).fg(Color::Black).add_modifier(Modifier::BOLD)),
         Span::styled(format!("  rows {} · nulls {} ({})", total, p.nulls, pct(p.nulls as u64, total)), DIM),
     ]));
     lines.push(Line::from(""));
@@ -868,7 +928,7 @@ fn draw_profile(f: &mut ratatui::Frame, area: Rect, app: &mut App, ci: usize) {
         if w >= 10 {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled("box & whisker", DIM)));
-            lines.push(Line::from(Span::styled(box_plot(st, w), Color::Yellow)));
+            lines.push(Line::from(Span::styled(box_plot(st, w), ACCENT_YELLOW)));
         }
     }
     if let Some(items) = &p.top {
@@ -942,11 +1002,12 @@ fn draw_table_picker(f: &mut ratatui::Frame, area: Rect, tables: &[String], sele
     f.render_widget(Clear, rects);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             " Select Table / Sheet ",
-            Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD),
         ))
-        .border_style(DIM);
+        .border_style(Style::new().fg(BORDER_COLOR));
     let inner = block.inner(rects);
     f.render_widget(block, rects);
 
@@ -954,8 +1015,8 @@ fn draw_table_picker(f: &mut ratatui::Frame, area: Rect, tables: &[String], sele
     for (i, t) in tables.iter().enumerate() {
         if i == selected {
             lines.push(Line::from(vec![
-                Span::styled(" ► ", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {} ", t), Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(" ► ", Style::new().fg(ACCENT_PEACH).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {} ", t), Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD)),
             ]));
         } else {
             lines.push(Line::from(vec![
@@ -969,9 +1030,85 @@ fn draw_table_picker(f: &mut ratatui::Frame, area: Rect, tables: &[String], sele
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_command_palette(f: &mut ratatui::Frame, area: Rect, query: &str, selected: usize) {
+    let rects = popup(area, 60, 65);
+    f.render_widget(Clear, rects);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " Command Palette ",
+            Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::new().fg(BORDER_COLOR));
+    let inner = block.inner(rects);
+    f.render_widget(block, rects);
+
+    if inner.height < 4 {
+        return;
+    }
+
+    let q = query.to_lowercase();
+    let filtered: Vec<&crate::app::PaletteItem> = crate::app::PALETTE_COMMANDS
+        .iter()
+        .filter(|c| {
+            c.title.to_lowercase().contains(&q)
+                || c.id.to_lowercase().contains(&q)
+                || c.key.eq_ignore_ascii_case(&q)
+                || c.category.to_lowercase().contains(&q)
+        })
+        .collect();
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(" > ", Style::new().fg(ACCENT_PEACH).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if query.is_empty() { "type to filter commands..." } else { query },
+            if query.is_empty() { DIM } else { Style::new().fg(Color::White).add_modifier(Modifier::BOLD) },
+        ),
+    ]));
+    lines.push(Line::from(Span::styled("─".repeat(inner.width as usize), Style::new().fg(BORDER_COLOR))));
+
+    let max_items = (inner.height as usize).saturating_sub(4);
+    let scroll_offset = if selected >= max_items { selected + 1 - max_items } else { 0 };
+
+    for (i, item) in filtered.iter().enumerate().skip(scroll_offset).take(max_items) {
+        let is_sel = i == selected;
+        let prefix = if is_sel { " ► " } else { "   " };
+        let category_tag = format!("[{}]", item.category);
+        let title_w = (inner.width as usize).saturating_sub(prefix.len() + category_tag.len() + item.key.len() + 6);
+        let truncated_title = trunc(item.title, title_w);
+        let padding = " ".repeat(title_w.saturating_sub(truncated_title.width()));
+
+        let style = if is_sel {
+            Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(TEXT_PRIMARY)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::new().fg(ACCENT_PEACH).add_modifier(Modifier::BOLD)),
+            Span::styled(truncated_title, style),
+            Span::raw(padding),
+            Span::styled(format!(" {:<9} ", category_tag), DIM),
+            Span::styled(format!(" [{}] ", item.key), Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)),
+        ]));
+    }
+
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled("   No matching commands", DIM)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" [↑/↓/Tab] navigate · [enter] run · [esc] close ", DIM)));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 const HELP: &[(&str, &str)] = &[
     ("h / j / k / l (←↑→↓)", "move cursor"),
     ("Tab / BackTab", "next / previous cell"),
+    (":", "command palette (omnibar)"),
+    ("Ctrl+p", "command palette (omnibar)"),
     ("/", "search prompts for text"),
     ("n / N", "next / previous search hit"),
     ("f", "filter rows (substring or col>val, col=val)"),
@@ -986,6 +1123,7 @@ const HELP: &[(&str, &str)] = &[
     ("PgUp / PgDn", "page 10 rows"),
     ("p", "profile column (stats, quantiles, box plot)"),
     ("c", "cycle chart type (HIST→LINE→DOT)"),
+    ("w", "toggle chart layout (bottom/right split)"),
     ("x", "toggle column as X-axis for bivariate chart"),
     ("t", "toggle chart pane"),
     ("0", "jump to first column"),
@@ -995,15 +1133,16 @@ const HELP: &[(&str, &str)] = &[
 
 
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
-    let rects = popup(area, 60, 60);
+    let rects = popup(area, 60, 65);
     f.render_widget(Clear, rects);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " dv — keys ",
-            Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            " dv — Modern Terminal Visualizer ",
+            Style::new().fg(Color::Black).bg(ACCENT_PEACH).add_modifier(Modifier::BOLD),
         ))
-        .border_style(DIM);
+        .border_style(Style::new().fg(BORDER_COLOR));
     let mut lines = Vec::new();
     for (k, d) in HELP {
         lines.push(Line::from(vec![

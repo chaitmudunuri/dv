@@ -7,12 +7,51 @@ pub struct Cell {
     pub col: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartLayout {
+    Bottom,
+    Right,
+}
+
+#[derive(Clone, Debug)]
+pub struct PaletteItem {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub category: &'static str,
+    pub key: &'static str,
+}
+
+pub const PALETTE_COMMANDS: &[PaletteItem] = &[
+    PaletteItem { id: "filter", title: "Filter rows (substring or col>val)", category: "Data", key: "f" },
+    PaletteItem { id: "search", title: "Search across cells", category: "Navigate", key: "/" },
+    PaletteItem { id: "sort_asc", title: "Sort column ascending", category: "Sort", key: "s" },
+    PaletteItem { id: "sort_desc", title: "Sort column descending", category: "Sort", key: "S" },
+    PaletteItem { id: "reset", title: "Reset sort & active filter", category: "Data", key: "u" },
+    PaletteItem { id: "heatmap", title: "Toggle conditional formatting / heatmap", category: "View", key: "H" },
+    PaletteItem { id: "chart_toggle", title: "Toggle chart pane", category: "Chart", key: "t" },
+    PaletteItem { id: "chart_kind", title: "Cycle chart type (Hist → Line → Dot)", category: "Chart", key: "c" },
+    PaletteItem { id: "chart_xaxis", title: "Toggle column as X-axis (bivariate)", category: "Chart", key: "x" },
+    PaletteItem { id: "chart_layout", title: "Toggle chart layout (Bottom / Right split)", category: "Chart", key: "w" },
+    PaletteItem { id: "profile", title: "Profile column (stats, quantiles, boxplot)", category: "Analyze", key: "p" },
+    PaletteItem { id: "export", title: "Export view to CSV / Parquet / JSONL", category: "File", key: "e" },
+    PaletteItem { id: "tables", title: "Select table / sheet", category: "File", key: "m" },
+    PaletteItem { id: "freeze", title: "Freeze / unfreeze panes up to cursor", category: "View", key: "F" },
+    PaletteItem { id: "yank_cell", title: "Yank cell value to clipboard", category: "Clipboard", key: "y" },
+    PaletteItem { id: "yank_row", title: "Yank row as CSV to clipboard", category: "Clipboard", key: "Y" },
+    PaletteItem { id: "width_widen", title: "Widen column width", category: "View", key: ">" },
+    PaletteItem { id: "width_shrink", title: "Shrink column width", category: "View", key: "<" },
+    PaletteItem { id: "width_reset", title: "Reset column width to auto-fit", category: "View", key: "=" },
+    PaletteItem { id: "help", title: "Keyboard shortcuts & help", category: "Help", key: "?" },
+    PaletteItem { id: "quit", title: "Quit dv", category: "App", key: "q" },
+];
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Profile(usize),
     Help,
     TablePicker { tables: Vec<String>, selected: usize },
+    CommandPalette { query: String, selected: usize },
 }
 
 pub struct App {
@@ -22,6 +61,7 @@ pub struct App {
     pub hcol: usize, // first visible column when horizontally scrolled
     pub chart_on: bool,
     pub chart_kind: ChartKind, // current kind for numeric cols
+    pub chart_layout: ChartLayout, // bottom split vs right sidebar split
     pub chart_col: usize,      // col the cached chart was built for
     pub chart_valid: bool,
     pub chart_data: Option<crate::data::ChartData>,
@@ -64,6 +104,7 @@ impl App {
             hcol: 0,
             chart_on: false,
             chart_kind: ChartKind::Hist,
+            chart_layout: ChartLayout::Bottom,
             chart_col: usize::MAX,
             chart_valid: false,
             chart_data: None,
@@ -184,6 +225,53 @@ impl App {
                 return;
             }
 
+            if let Overlay::CommandPalette { query, selected } = &mut self.overlay {
+                let q = query.to_lowercase();
+                let filtered: Vec<&PaletteItem> = PALETTE_COMMANDS
+                    .iter()
+                    .filter(|c| {
+                        c.title.to_lowercase().contains(&q)
+                            || c.id.to_lowercase().contains(&q)
+                            || c.key.eq_ignore_ascii_case(&q)
+                            || c.category.to_lowercase().contains(&q)
+                    })
+                    .collect();
+                match ev.code {
+                    KeyCode::Esc => {
+                        self.overlay = Overlay::None;
+                    }
+                    KeyCode::Up | KeyCode::BackTab => {
+                        if *selected == 0 {
+                            *selected = filtered.len().saturating_sub(1);
+                        } else {
+                            *selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        *selected = (*selected + 1) % filtered.len().max(1);
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        *selected = 0;
+                    }
+                    KeyCode::Char(c) => {
+                        query.push(c);
+                        *selected = 0;
+                    }
+                    KeyCode::Enter => {
+                        if !filtered.is_empty() {
+                            let chosen_id = filtered[*selected.min(&mut (filtered.len() - 1))].id;
+                            self.overlay = Overlay::None;
+                            self.execute_command(chosen_id);
+                        } else {
+                            self.overlay = Overlay::None;
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
             match ev.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') | KeyCode::Enter => {
                     self.overlay = Overlay::None
@@ -198,6 +286,9 @@ impl App {
                 KeyCode::Esc => {
                     self.search_mode = false;
                     self.search_input.clear();
+                    if self.finding.is_none() {
+                        self.hits.clear();
+                    }
                 }
                 KeyCode::Enter => {
                     self.search_mode = false;
@@ -236,8 +327,22 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     self.search_input.pop();
+                    if self.search_input.is_empty() {
+                        self.hits.clear();
+                    } else {
+                        self.hits = crate::data::find_all(&self.data, &self.search_input)
+                            .into_iter()
+                            .map(|(row, col)| Cell { row, col })
+                            .collect();
+                    }
                 }
-                KeyCode::Char(c) => self.search_input.push(c),
+                KeyCode::Char(c) => {
+                    self.search_input.push(c);
+                    self.hits = crate::data::find_all(&self.data, &self.search_input)
+                        .into_iter()
+                        .map(|(row, col)| Cell { row, col })
+                        .collect();
+                }
                 _ => {}
             }
             return;
@@ -323,6 +428,9 @@ impl App {
         if ev.modifiers.contains(KeyModifiers::CONTROL) {
             match ev.code {
                 KeyCode::Char('c') | KeyCode::Char('d') => self.quit = true,
+                KeyCode::Char('p') => {
+                    self.overlay = Overlay::CommandPalette { query: String::new(), selected: 0 };
+                }
                 KeyCode::Char('u') => {
                     self.sel.row = self.sel.row.saturating_sub(4);
                 }
@@ -541,7 +649,13 @@ impl App {
             KeyCode::Char('p') => self.overlay = Overlay::Profile(self.sel.col),
             KeyCode::Char('t') => self.chart_on = !self.chart_on,
             KeyCode::Char('c') => self.chart_kind = next_kind(self.chart_kind),
-
+            KeyCode::Char('w') => self.execute_command("chart_layout"),
+            KeyCode::Char(':') => {
+                self.overlay = Overlay::CommandPalette {
+                    query: String::new(),
+                    selected: 0,
+                };
+            }
 
             KeyCode::PageDown => {
                 self.sel.row = (self.sel.row + 10).min(rows - 1);
@@ -590,6 +704,220 @@ impl App {
                 self.hcol = 0;
                 self.chart_valid = false;
             }
+            _ => {}
+        }
+    }
+
+    pub fn handle_mouse(&mut self, ev: crossterm::event::MouseEvent) {
+        let rows = self.data.df.height();
+        match ev.kind {
+            crossterm::event::MouseEventKind::ScrollDown => {
+                self.sel.row = (self.sel.row + 3).min(rows.saturating_sub(1));
+                self.chart_valid = false;
+            }
+            crossterm::event::MouseEventKind::ScrollUp => {
+                self.sel.row = self.sel.row.saturating_sub(3);
+                self.chart_valid = false;
+            }
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if self.overlay != Overlay::None {
+                    self.overlay = Overlay::None;
+                    return;
+                }
+                if self.msg.is_some() {
+                    self.msg = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn execute_command(&mut self, cmd: &str) {
+        match cmd {
+            "filter" => {
+                self.filter_mode = true;
+                self.filter_input.clear();
+            }
+            "search" => {
+                self.search_mode = true;
+                self.search_input.clear();
+            }
+            "sort_asc" => {
+                let ci = self.sel.col;
+                if let Err(e) = self.data.sort_by_col(ci, true) {
+                    self.msg = Some((format!("sort error: {e}"), "red"));
+                } else {
+                    self.sel.row = 0;
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                    self.msg = Some((format!("sorted by \"{}\" asc", self.data.cols[ci].name), "ok"));
+                }
+            }
+            "sort_desc" => {
+                let ci = self.sel.col;
+                if let Err(e) = self.data.sort_by_col(ci, false) {
+                    self.msg = Some((format!("sort error: {e}"), "red"));
+                } else {
+                    self.sel.row = 0;
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                    self.msg = Some((format!("sorted by \"{}\" desc", self.data.cols[ci].name), "ok"));
+                }
+            }
+            "reset" => {
+                let filter_cleared = self.active_filter.is_some();
+                if filter_cleared {
+                    self.data.df = self.data.orig_df.clone();
+                    self.active_filter = None;
+                    self.sel = Cell { row: 0, col: 0 };
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                }
+                let sort_cleared = self.data.sort_state.is_some();
+                if sort_cleared {
+                    self.data.reset_sort();
+                    self.chart_valid = false;
+                    self.profiles.clear();
+                }
+                if filter_cleared || sort_cleared {
+                    let m = if filter_cleared && sort_cleared {
+                        "reset sort and filter"
+                    } else if sort_cleared {
+                        "reset sort order"
+                    } else {
+                        "reset filter"
+                    };
+                    self.msg = Some((m.to_string(), "ok"));
+                }
+            }
+            "heatmap" => {
+                self.heatmap = !self.heatmap;
+                self.msg = Some((
+                    if self.heatmap {
+                        "heatmap mode ON"
+                    } else {
+                        "heatmap mode OFF"
+                    }
+                    .to_string(),
+                    "ok",
+                ));
+            }
+            "chart_toggle" => self.chart_on = !self.chart_on,
+            "chart_kind" => self.chart_kind = next_kind(self.chart_kind),
+            "chart_xaxis" => {
+                if self.x_col == Some(self.sel.col) {
+                    self.x_col = None;
+                    self.chart_valid = false;
+                    self.msg = Some(("unset X-axis (reset to row index)".to_string(), "ok"));
+                } else {
+                    self.x_col = Some(self.sel.col);
+                    self.chart_valid = false;
+                    let cname = &self.data.cols[self.sel.col].name;
+                    self.msg = Some((format!("set X-axis to \"{}\"", cname), "green"));
+                }
+            }
+            "chart_layout" => {
+                self.chart_layout = match self.chart_layout {
+                    ChartLayout::Bottom => ChartLayout::Right,
+                    ChartLayout::Right => ChartLayout::Bottom,
+                };
+                self.msg = Some((
+                    match self.chart_layout {
+                        ChartLayout::Bottom => "chart layout: bottom split",
+                        ChartLayout::Right => "chart layout: right sidebar split",
+                    }
+                    .to_string(),
+                    "ok",
+                ));
+            }
+            "profile" => self.overlay = Overlay::Profile(self.sel.col),
+            "export" => {
+                self.export_mode = true;
+                let stem = self.data.name.split('.').next().unwrap_or("export");
+                self.export_input = format!("{}_export.csv", stem);
+            }
+            "tables" => {
+                if let Some(src) = &self.source_path {
+                    match crate::sources::list_tables(src) {
+                        Ok(tables) if tables.len() > 1 => {
+                            self.overlay = Overlay::TablePicker { tables, selected: 0 };
+                        }
+                        Ok(_) => {
+                            self.msg = Some(("single-table file (no other tables)".to_string(), "ok"));
+                        }
+                        Err(e) => {
+                            self.msg = Some((format!("list tables failed: {e}"), "red"));
+                        }
+                    }
+                }
+            }
+            "freeze" => {
+                if self.pinned_cols > 0 {
+                    self.pinned_cols = 0;
+                    self.msg = Some(("unpinned columns".to_string(), "ok"));
+                } else {
+                    let count = (self.sel.col + 1).min(self.data.cols.len());
+                    self.pinned_cols = count;
+                    self.msg = Some((
+                        format!("pinned {} col{}", count, if count == 1 { "" } else { "s" }),
+                        "green",
+                    ));
+                }
+            }
+            "yank_cell" => {
+                if !self.data.cols.is_empty() && self.data.df.height() > 0 {
+                    let colname = &self.data.cols[self.sel.col].name;
+                    let kind = self.data.cols[self.sel.col].kind;
+                    if let Ok(col) = self.data.df.column(colname) {
+                        let s = col.as_materialized_series();
+                        let text = crate::data::cell_string(s, self.sel.row, kind);
+                        crate::clipboard::copy_to_clipboard(&text);
+                        let preview = crate::ui::trunc(&text, 20);
+                        self.msg = Some((format!("yanked cell: \"{}\"", preview), "green"));
+                    }
+                }
+            }
+            "yank_row" => {
+                if !self.data.cols.is_empty() && self.data.df.height() > 0 {
+                    let mut row_vals = Vec::new();
+                    for c in &self.data.cols {
+                        if let Ok(col) = self.data.df.column(&c.name) {
+                            let s = col.as_materialized_series();
+                            let val = crate::data::cell_string(s, self.sel.row, c.kind);
+                            if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+                                row_vals.push(format!("\"{}\"", val.replace('"', "\"\"")));
+                            } else {
+                                row_vals.push(val);
+                            }
+                        }
+                    }
+                    let line = row_vals.join(",");
+                    crate::clipboard::copy_to_clipboard(&line);
+                    self.msg = Some((format!("yanked row {} as CSV", self.sel.row + 1), "green"));
+                }
+            }
+            "width_widen" => {
+                let ci = self.sel.col;
+                let cur = self.col_widths.get(&ci).copied().unwrap_or(12);
+                let new_w = (cur + 2).min(80);
+                self.col_widths.insert(ci, new_w);
+                self.msg = Some((format!("col width: {}", new_w), "ok"));
+            }
+            "width_shrink" => {
+                let ci = self.sel.col;
+                let cur = self.col_widths.get(&ci).copied().unwrap_or(12);
+                let new_w = cur.saturating_sub(2).max(3);
+                self.col_widths.insert(ci, new_w);
+                self.msg = Some((format!("col width: {}", new_w), "ok"));
+            }
+            "width_reset" => {
+                let ci = self.sel.col;
+                if self.col_widths.remove(&ci).is_some() {
+                    self.msg = Some(("reset col width to auto".to_string(), "ok"));
+                }
+            }
+            "help" => self.overlay = Overlay::Help,
+            "quit" => self.quit = true,
             _ => {}
         }
     }

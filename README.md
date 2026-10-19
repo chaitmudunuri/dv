@@ -28,13 +28,15 @@ Csv/tsv/arrow/ipc can also be read from a pipe.
 Multi-table files (sqlite, duckdb) auto-open the biggest table; open a
 specific one with a `::table` suffix, e.g. `dv demo.duckdb::tips`.
 
-## Keys
+## Keys & Controls
 
 | key | action |
 |---|---|
+| `:` / `Ctrl+P` | **Command Palette** (fuzzy search & run any command) |
 | `h j k l` / arrows | move cursor |
+| `Mouse Wheel` | scroll data rows up / down smoothly |
 | `Tab` / `BackTab` | next / previous cell |
-| `/` | search text across cells (`n`/`N` next/prev hit) |
+| `/` | live incremental search (`n`/`N` next/prev hit, live hit counter pill) |
 | `f` | filter rows (substring or `col>val`, `col=val`, `col!=val`) |
 | `s` / `S` | sort column ascending / descending |
 | `u` | reset sort order and active filter |
@@ -43,6 +45,7 @@ specific one with a `::table` suffix, e.g. `dv demo.duckdb::tips`.
 | `=` | reset column width to auto-fit |
 | `H` | toggle conditional formatting / heatmap |
 | `x` | toggle column as X-axis for bivariate chart ($X$ vs $Y$) |
+| `w` | toggle chart layout (classic bottom split vs right sidebar split) |
 | `e` | export current view to CSV, Parquet, or JSONL |
 | `m` | table / sheet picker (SQLite, DuckDB, Excel) |
 | `y` / `Y` | yank cell / row as CSV to clipboard |
@@ -55,7 +58,7 @@ specific one with a `::table` suffix, e.g. `dv demo.duckdb::tips`.
 | `?` | help overlay |
 | `q` | quit |
 
-Numeric columns show a histogram, line, or dot plot; bivariate charting (`x`) plots two numeric columns against each other. Text and bool columns show a TOP-K bar chart. Column profiling (`p`) provides percentiles (`p25`, median, `p75`, `p90`, `p99`, `iqr`) and a Unicode box & whisker plot.
+Numeric columns show a histogram, line, or dot plot; bivariate charting (`x`) plots two numeric columns against each other. Text and bool columns show a TOP-K bar chart. Column profiling (`p`) provides percentiles (`p25`, median, `p75`, `p90`, `p99`, `iqr`) and a Unicode box & whisker plot. Press `w` to toggle between bottom-split and right-sidebar chart layouts. Full mouse and trackpad scrolling is supported.
 
 ## Install
 

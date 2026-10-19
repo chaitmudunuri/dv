@@ -229,4 +229,57 @@ fn table_picker_overlay() {
     assert!(s.contains("switched to table"), "switched table flash message");
 }
 
+#[test]
+fn command_palette_filter_and_execute() {
+    let s = render("samples/demo.csv", &[':']);
+    assert!(s.contains("Command Palette"), "palette overlay title");
+    assert!(s.contains("conditional formatting"), "palette command listed");
+
+    // Filter for heatmap and hit enter to execute
+    let s = render("samples/demo.csv", &[':', 'h', 'e', 'a', 't', '\n']);
+    assert!(s.contains("heatmap mode ON"), "heatmap flash message active after executing command");
+
+    // Dismiss message and verify badge
+    let s = render("samples/demo.csv", &[':', 'h', 'e', 'a', 't', '\n', 'j']);
+    assert!(s.contains("[HEATMAP]"), "heatmap badge active after dismissing flash message");
+}
+
+#[test]
+fn chart_layout_toggle_w() {
+    let d = data::load(std::path::Path::new("samples/demo.csv")).expect("load");
+    let mut a = App::with_path(d, Some(std::path::PathBuf::from("samples/demo.csv")));
+    assert_eq!(a.chart_layout, dv::app::ChartLayout::Bottom);
+    let ev = crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('w'), crossterm::event::KeyModifiers::empty());
+    a.handle_key(ev);
+    assert_eq!(a.chart_layout, dv::app::ChartLayout::Right);
+    a.msg = None;
+    a.handle_key(ev);
+    assert_eq!(a.chart_layout, dv::app::ChartLayout::Bottom);
+}
+
+#[test]
+fn mouse_wheel_scrolling() {
+    let d = data::load(std::path::Path::new("samples/demo.csv")).expect("load");
+    let mut a = App::with_path(d, Some(std::path::PathBuf::from("samples/demo.csv")));
+    assert_eq!(a.sel.row, 0);
+
+    let scroll_down = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: 10,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    };
+    a.handle_mouse(scroll_down);
+    assert_eq!(a.sel.row, 3, "scrolled down 3 rows");
+
+    let scroll_up = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollUp,
+        column: 10,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    };
+    a.handle_mouse(scroll_up);
+    assert_eq!(a.sel.row, 0, "scrolled back up");
+}
+
 
