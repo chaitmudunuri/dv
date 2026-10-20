@@ -250,7 +250,8 @@ fn build_one_col(
         ow.min(avail)
     } else {
         let mut w = cells.iter().map(|c| c.width()).max().unwrap_or(0);
-        w = w.max(col_letter(ci).width() + 2).max(4).min(24);
+        let name_w = app.data.cols[ci].name.width();
+        w = w.max(col_letter(ci).width() + 2).max(name_w + 7).max(8).min(24);
         w.min(avail)
     };
     if w == 0 {
@@ -330,10 +331,10 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let rows_v = area.height as usize; // includes header line
-    let data_rows_v = rows_v.saturating_sub(1);
+    let rows_v = area.height as usize; // includes 2 header lines
+    let data_rows_v = rows_v.saturating_sub(2);
     let gutter = digits(rows_total).max(2) + 1;
-    let scroll_row = if app.sel.row >= data_rows_v {
+    let scroll_row = if app.sel.row >= data_rows_v && data_rows_v > 0 {
         app.sel.row + 1 - data_rows_v
     } else {
         0
@@ -350,8 +351,8 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // header letter row (VisiCalc-style A, B, C …)
-    let mut spans = vec![Span::styled(" ".repeat(gutter), DIM)];
+    // Row 0: header letter row (VisiCalc-style A, B, C … with sort/x badges)
+    let mut spans0 = vec![Span::styled(" ".repeat(gutter), DIM)];
     for (idx, c) in cols.iter().enumerate() {
         let mut letter = col_letter(c.ci);
         if let Some((sci, asc)) = app.data.sort_state {
@@ -367,17 +368,54 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         } else {
             Style::new().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)
         };
-        spans.push(Span::styled(pad_align(letter, c.w, true), style));
+        spans0.push(Span::styled(pad_align(letter, c.w, true), style));
         if pinned > 0 && c.ci + 1 == pinned && idx + 1 < cols.len() {
-            spans.push(Span::styled("│", Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)));
+            spans0.push(Span::styled("│", Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)));
         } else {
-            spans.push(Span::raw(" "));
+            spans0.push(Span::raw(" "));
         }
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)),
+        Paragraph::new(Line::from(spans0)),
         Rect { y: area.y, height: 1, ..area },
     );
+
+    // Row 1: header column name row with type badge ([num], [txt], [bool])
+    if area.height > 1 {
+        let mut spans1 = vec![Span::styled(" ".repeat(gutter), DIM)];
+        for (idx, c) in cols.iter().enumerate() {
+            let name = &app.data.cols[c.ci].name;
+            let kind = app.data.cols[c.ci].kind;
+            let right = kind == ColKind::Number;
+            let type_tag = match kind {
+                ColKind::Number => "num",
+                ColKind::Text => "txt",
+                ColKind::Bool => "bool",
+            };
+            let label = if c.w >= name.width() + type_tag.len() + 3 {
+                format!("{} [{}]", name, type_tag)
+            } else if c.w >= name.width() + 2 {
+                format!("{}:{}", name, type_tag)
+            } else {
+                name.clone()
+            };
+            let style = if c.ci == app.sel.col {
+                Style::new().fg(ACCENT_PEACH).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)
+            };
+            spans1.push(Span::styled(pad_align(label, c.w, right), style));
+            if pinned > 0 && c.ci + 1 == pinned && idx + 1 < cols.len() {
+                spans1.push(Span::styled("│", Style::new().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)));
+            } else {
+                spans1.push(Span::raw(" "));
+            }
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans1)),
+            Rect { y: area.y + 1, height: 1, ..area },
+        );
+    }
 
     // data rows
     for rel in 0..data_rows_v {
@@ -444,7 +482,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
         f.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect { y: area.y + rel as u16 + 1, height: 1, ..area },
+            Rect { y: area.y + rel as u16 + 2, height: 1, ..area },
         );
     }
 
@@ -458,7 +496,7 @@ fn draw_grid(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             .track_symbol(None)
             .thumb_symbol("█")
             .style(Style::new().fg(BORDER_COLOR)),
-        Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area },
+        Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area },
         &mut scrollbar_state,
     );
 }

@@ -42,6 +42,7 @@ fn grid_renders_and_chart_toggles() {
     let s = render("samples/demo.csv", &[]);
     assert!(s.contains("demo.csv"), "file name in status");
     assert!(s.contains("A") && s.contains("B"), "col letters");
+    assert!(s.contains("age [num]") && s.contains("city [txt]"), "col names and types in header");
     assert!(!s.contains("HIST"), "no chart pane by default");
 
     // toggle on → histogram
